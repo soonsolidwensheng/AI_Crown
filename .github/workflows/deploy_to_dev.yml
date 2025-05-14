@@ -1,0 +1,72 @@
+name: Deploy to Dev
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version number for the Docker image'
+        required: true
+      skip_image:
+        description: 'Skip image build and push (true/false)'
+        required: false
+        default: 'false'
+env:
+  REGISTRY: registry.cn-beijing.aliyuncs.com 
+  NAMESPACE: studio_ai # ACR命名空间
+  IMAGE_NAME: ai_crown 
+jobs:
+  deploy-to-dev:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Login to Alibaba Cloud ACR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+      - name: Build and Push Docker image
+        # uses: docker/build-push-action@v5
+        # with:
+        #   context: .
+        #   file: ./Dockerfile 
+        #   push: true
+        #   tags: |
+        #     ${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ env.IMAGE_NAME }}:latest
+        #     ${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+        #   labels: |
+        #     org.opencontainers.image.source=${{ github.repository_url }}
+        if: ${{ inputs.skip_image != 'true' }}
+        run: |
+          VERSION=${{ github.event.inputs.version }}
+          ACR_URI=${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ env.IMAGE_NAME }}
+
+          echo "Building Docker image with tag $ACR_URI:$VERSION"
+          docker build -t $ACR_URI:$VERSION .
+
+      - name: Push Docker image to ACR
+        if: ${{ inputs.skip_image != 'true' }}
+        run: |
+          VERSION=${{ github.event.inputs.version }}
+          ACR_URI=${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ env.IMAGE_NAME }}
+          AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          ACR_URI=$AWS_ACCOUNT_ID.dkr.ecr.us-west-2.amazonaws.com/$REPOSITORY_NAME
+          
+          docker login -u "${{secrets.ACR_USERNAME}}" -p "${{secrets.ACR_PASSWORD}}" ${{ env.REGISTRY }}
+          echo "Pushing Docker image with tag $ACR_URI:$VERSION"
+          docker push $ACR_URI:$VERSION
+
+      # - name: Create Release Tag
+      #   env:
+      #       VERSION: ${{ github.event.inputs.version }}
+      #   run: |
+      #       git config user.name "github-actions[bot]"
+      #       git config user.email "github-actions[bot]@users.noreply.github.com"
+      #       git tag -a "v$VERSION" -m "Release version $VERSION"
+        
+      #       echo "Pushing the tag to the repository"
+      #       git push https://${{ secrets.FGPAT_TOKEN }}@github.com/${{ github.repository }} "v$VERSION"
+          
