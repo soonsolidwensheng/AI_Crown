@@ -57,6 +57,62 @@ jobs:
           echo "Pushing Docker image with tag $ACR_URI:$VERSION"
           docker push $ACR_URI:$VERSION
 
+      - name: Configure Alibaba Cloud Credentials
+        uses: aliyun/configure-alicloud-credentials@v2
+        with:
+          access-key-id: ${{ secrets.ALICLOUD_ACCESS_KEY }}
+          access-key-secret: ${{ secrets.ALICLOUD_SECRET }}
+          region: cn-beijing
+          
+      - name: Install Aliyun CLI
+        run: |
+          # 检查 CLI 是否已安装
+          if ! command -v aliyun &> /dev/null; then
+            echo "Installing Aliyun CLI..."
+            curl -fsSL https://aliyuncli.alicdn.com/aliyun-cli-linux-latest-amd64.tgz -o aliyun-cli.tgz
+            tar -xzf aliyun-cli.tgz
+            sudo mv aliyun /usr/local/bin/
+            echo "Aliyun CLI installed successfully"
+          else
+            echo "Aliyun CLI already installed"
+          fi
+          aliyun version 
+          
+      - name: Generate FC3 Config
+        env:
+          ACR_IMAGE: ${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ env.IMAGE_NAME }}:${{ github.event.inputs.version }}
+          FUNCTION_NAME: ai_crown_acr
+        run: |
+          cat <<EOF > fc3-config.json
+          {
+            "functionName": "$FUNCTION_NAME",
+            "runtime": "custom",
+            "timeout": 60,
+            "customContainerConfig": {
+              "image": "$ACR_IMAGE",
+              "command": ["node"],
+              "args": ["index.js"]
+            },
+            "instanceType": "ecs.c6.large",
+            "caPort": 9000
+          }
+          EOF
+  
+      - name: Deploy Function
+        run: |
+          aliyun fc CreateFunction \
+            --region cn-beijing \ 
+            --function-name $FUNCTION_NAME \
+            --body file://fc3-config.json || \
+          aliyun fc UpdateFunction \
+            --region cn-beijing \ 
+            --function-name $FUNCTION_NAME \
+            --body file://fc3-config.json
+  
+      - name: Cleanup
+        run: rm -f fc3-config.json
+      
+          
       # - name: Create Release Tag
       #   env:
       #       VERSION: ${{ github.event.inputs.version }}
