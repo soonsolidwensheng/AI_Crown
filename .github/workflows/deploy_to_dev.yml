@@ -21,13 +21,6 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
-      
-      - name: Configure Alibaba Cloud Credentials
-        uses: aliyun/configure-alicloud-credentials@v2
-        with:
-          accessKeyId: ${{ secrets.ALICLOUD_ACCESS_KEY }}
-          accessKeySecret: ${{ secrets.ALICLOUD_SECRET }}
-          regionId: cn-beijing
           
       - name: Login to Alibaba Cloud ACR
         uses: docker/login-action@v3
@@ -35,17 +28,7 @@ jobs:
           registry: ${{ env.REGISTRY }}
           username: ${{ secrets.ACR_USERNAME }}
           password: ${{ secrets.ACR_PASSWORD }}
-      - name: Build and Push Docker image
-        # uses: docker/build-push-action@v5
-        # with:
-        #   context: .
-        #   file: ./Dockerfile 
-        #   push: true
-        #   tags: |
-        #     ${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ env.IMAGE_NAME }}:latest
-        #     ${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
-        #   labels: |
-        #     org.opencontainers.image.source=${{ github.repository_url }}
+      - name: Build Docker image
         if: ${{ inputs.skip_image != 'true' }}
         run: |
           VERSION=${{ github.event.inputs.version }}
@@ -53,16 +36,26 @@ jobs:
 
           echo "Building Docker image with tag $ACR_URI:$VERSION"
           docker build -t $ACR_URI:$VERSION .
-
-      - name: Push Docker image to ACR
-        if: ${{ inputs.skip_image != 'true' }}
-        run: |
-          VERSION=${{ github.event.inputs.version }}
-          ACR_URI=${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ env.IMAGE_NAME }}
-          
           docker login -u "${{secrets.ACR_USERNAME}}" -p "${{secrets.ACR_PASSWORD}}" ${{ env.REGISTRY }}
           echo "Pushing Docker image with tag $ACR_URI:$VERSION"
           docker push $ACR_URI:$VERSION
+          
+      # - name: Push Docker image to ACR
+      #   if: ${{ inputs.skip_image != 'true' }}
+      #   run: |
+      #     VERSION=${{ github.event.inputs.version }}
+      #     ACR_URI=${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ env.IMAGE_NAME }}
+          
+      #     docker login -u "${{secrets.ACR_USERNAME}}" -p "${{secrets.ACR_PASSWORD}}" ${{ env.REGISTRY }}
+      #     echo "Pushing Docker image with tag $ACR_URI:$VERSION"
+      #     docker push $ACR_URI:$VERSION
+      
+      - name: Configure Alibaba Cloud Credentials
+        uses: aliyun/configure-alicloud-credentials@v2
+        with:
+          access-key-id: ${{secrets.ALICLOUD_ACCESS_KEY}}
+          access-key-secret: ${{secrets.ALICLOUD_SECRET}}
+          region: cn-beijing
           
       - name: Install Aliyun CLI
         run: |
