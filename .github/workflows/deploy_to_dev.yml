@@ -14,6 +14,10 @@ env:
   REGISTRY: registry.cn-beijing.aliyuncs.com 
   NAMESPACE: studio_ai # ACR命名空间
   IMAGE_NAME: ai_crown 
+
+  ALIBABA_CLOUD_ACCESS_KEY_ID: ${{ secrets.ALICLOUD_ACCESS_KEY }}
+  ALIBABA_CLOUD_ACCESS_KEY_SECRET: ${{ secrets.ALICLOUD_SECRET }}
+  ALICLOUD_REGION: cn-beijing
 jobs:
   deploy-to-dev:
     runs-on: ubuntu-latest
@@ -57,8 +61,8 @@ jobs:
           echo "Pushing Docker image with tag $ACR_URI:$VERSION"
           docker push $ACR_URI:$VERSION
           
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - name: Verify Credentials
+        run: aliyun configure list --profile default
       
       - name: Configure Alibaba Cloud Credentials
         uses: aliyun/configure-alicloud-credentials@v2
