@@ -53,7 +53,7 @@ jobs:
           VERSION=${{ github.event.inputs.version }}
           ACR_URI=${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ env.IMAGE_NAME }}
           AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-          ACR_URI=$AWS_ACCOUNT_ID.dkr.ecr.us-west-2.amazonaws.com/$REPOSITORY_NAME
+          ACR_URI=${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ env.IMAGE_NAME }}
           
           docker login -u "${{secrets.ACR_USERNAME}}" -p "${{secrets.ACR_PASSWORD}}" ${{ env.REGISTRY }}
           echo "Pushing Docker image with tag $ACR_URI:$VERSION"
