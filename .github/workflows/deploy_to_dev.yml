@@ -59,10 +59,11 @@ jobs:
           
       - name: Install Aliyun CLI
         run: |
+          sudo rm -f /usr/local/bin/aliyun
           # 检查 CLI 是否已安装
           if ! command -v aliyun &> /dev/null; then
             echo "Installing Aliyun CLI..."
-            curl -fsSL https://aliyuncli.alicdn.com/aliyun-cli-linux-3.0.161-amd64.tgz -o aliyun-cli.tgz
+            curl -fsSL https://aliyuncli.alicdn.com/aliyun-cli-linux-3.0.180-amd64.tgz -o aliyun-cli.tgz
             tar -xzf aliyun-cli.tgz
             sudo mv aliyun /usr/local/bin/
             echo "Aliyun CLI installed successfully"
