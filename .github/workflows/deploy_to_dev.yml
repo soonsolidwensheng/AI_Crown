@@ -62,7 +62,7 @@ jobs:
           # 检查 CLI 是否已安装
           if ! command -v aliyun &> /dev/null; then
             echo "Installing Aliyun CLI..."
-            curl -fsSL https://aliyuncli.alicdn.com/aliyun-cli-linux-latest-amd64.tgz -o aliyun-cli.tgz
+            curl -fsSL https://aliyuncli.alicdn.com/aliyun-cli-linux-3.0.161-amd64.tgz -o aliyun-cli.tgz
             tar -xzf aliyun-cli.tgz
             sudo mv aliyun /usr/local/bin/
             echo "Aliyun CLI installed successfully"
@@ -88,15 +88,14 @@ jobs:
           cat <<EOF > fc3-config.json
           {
             "functionName": "$FUNCTION_NAME",
-            "runtime": "custom",
+            "runtime": "custom-container",
+            "handler": "index.handler",
             "timeout": 60,
             "customContainerConfig": {
               "image": "$ACR_IMAGE",
               "command": ["node"],
               "args": ["index.js"]
-            },
-            "instanceType": "ecs.c6.large",
-            "caPort": 9000
+            }
           }
           EOF
   
@@ -105,7 +104,7 @@ jobs:
           aliyun fc CreateFunction \
             --region cn-beijing \ 
             --function-name $FUNCTION_NAME \
-            --body file://fc3-config.json 
+            --body $(pwd)/fc3-config.json 
           # aliyun fc UpdateFunction \
           #   --region cn-beijing \ 
           #   --function-name $FUNCTION_NAME \
