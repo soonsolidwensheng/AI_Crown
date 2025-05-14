@@ -56,7 +56,10 @@ jobs:
           docker login -u "${{secrets.ACR_USERNAME}}" -p "${{secrets.ACR_PASSWORD}}" ${{ env.REGISTRY }}
           echo "Pushing Docker image with tag $ACR_URI:$VERSION"
           docker push $ACR_URI:$VERSION
-
+          
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
       - name: Configure Alibaba Cloud Credentials
         uses: aliyun/configure-alicloud-credentials@v2
         with:
