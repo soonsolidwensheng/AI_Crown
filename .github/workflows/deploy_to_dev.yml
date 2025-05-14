@@ -105,11 +105,11 @@ jobs:
           aliyun fc CreateFunction \
             --region cn-beijing \ 
             --function-name $FUNCTION_NAME \
-            --body file://fc3-config.json || \
-          aliyun fc UpdateFunction \
-            --region cn-beijing \ 
-            --function-name $FUNCTION_NAME \
-            --body file://fc3-config.json
+            --body file://fc3-config.json 
+          # aliyun fc UpdateFunction \
+          #   --region cn-beijing \ 
+          #   --function-name $FUNCTION_NAME \
+          #   --body file://fc3-config.json
   
       - name: Cleanup
         run: rm -f fc3-config.json
