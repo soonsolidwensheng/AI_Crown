@@ -102,7 +102,7 @@ jobs:
   
       - name: Deploy Function
         run: |
-          aliyun --debug fc UpdateFunction \
+          aliyun  fc UpdateFunction \
             --region cn-beijing \ 
             --function-name $FUNCTION_NAME \
             --body $(pwd)/fc3-config.json 
