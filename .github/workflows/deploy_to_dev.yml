@@ -57,62 +57,30 @@ jobs:
       #     access-key-secret: ${{secrets.ALICLOUD_SECRET}}
       #     region: cn-beijing
           
-      - name: Install Aliyun CLI
-        run: |
-          sudo rm -f /usr/local/bin/aliyun
-          # 检查 CLI 是否已安装
-          if ! command -v aliyun &> /dev/null; then
-            echo "Installing Aliyun CLI..."
-            curl -fsSL https://aliyuncli.alicdn.com/aliyun-cli-linux-3.0.180-amd64.tgz -o aliyun-cli.tgz
-            tar -xzf aliyun-cli.tgz
-            sudo mv aliyun /usr/local/bin/
-            echo "Aliyun CLI installed successfully"
-          else
-            echo "Aliyun CLI already installed"
-          fi
-          aliyun version 
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '16'
+      
+      - name: Install Serverless Devs
+        run: sudo npm install @serverless-devs/s -g
        
-      - name: Setup CLI Credentials
-        run: |
-          aliyun configure set \
-            --mode AK \
-            --profile default \
-            --region cn-beijing \
-            --access-key-id ${{ secrets.ALICLOUD_ACCESS_KEY }} \
-            --access-key-secret ${{ secrets.ALICLOUD_SECRET }}
+      - name: Configure Alibaba Cloud Credentials
+        run: s config add --AccessKeyID ${{ secrets.ALICLOUD_ACCESS_KEY }} --AccessKeySecret ${{ secrets.ALICLOUD_SECRET }} -a default
+      
             
-      - name: Generate FC3 Config
-        env:
-          ACR_IMAGE: ${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ env.IMAGE_NAME }}:${{ github.event.inputs.version }}
-          FUNCTION_NAME: ai_crown_acr
+      # 部署到函数计算3.0
+      - name: Deploy to FC 3.0
         run: |
-          cat <<EOF > fc3-config.json
-          {
-            "functionName": "$FUNCTION_NAME",
-            "runtime": "custom-container",
-            "handler": "index.handler",
-            "timeout": 60,
+          VERSION=${{ github.event.inputs.version }}
+          ACR_URI=${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ env.IMAGE_NAME }}
+          s cli fc3 update -p '{
+            "region": "cn-beijing",
+            "functionName": "ai_crown_acr",
             "customContainerConfig": {
-              "image": "$ACR_IMAGE",
-              "command": ["node"],
-              "args": ["index.js"]
+              "image": "$ACR_URI:$VERSION"
             }
-          }
-          EOF
-  
-      - name: Deploy Function
-        run: |
-          aliyun  fc UpdateFunction \
-            --region cn-beijing \ 
-            --function-name $FUNCTION_NAME \
-            --body $(pwd)/fc3-config.json 
-          # aliyun fc UpdateFunction \
-          #   --region cn-beijing \ 
-          #   --function-name $FUNCTION_NAME \
-          #   --body file://fc3-config.json
-  
-      - name: Cleanup
-        run: rm -f fc3-config.json
+          }' -a default
       
           
       # - name: Create Release Tag
