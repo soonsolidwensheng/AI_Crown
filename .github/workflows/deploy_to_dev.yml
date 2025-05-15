@@ -74,7 +74,7 @@ jobs:
         run: |
           VERSION=${{ github.event.inputs.version }}
           ACR_URI=${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ env.IMAGE_NAME }}
-          s cli fc3 update -p '{
+          s cli fc3 deploy -p '{
             "region": "cn-beijing",
             "functionName": "ai_crown_acr",
             "customContainerConfig": {
