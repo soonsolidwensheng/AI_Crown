@@ -1,3 +1,69 @@
+# 25年7月24日更新内容
+多修复体参数说明，输入根据gpu参数有变化，输出与单修复体一致
+
+## stdcrown
+
+**输入Input**
+
+```json
+{   
+    "multi_restoration": "int",  // 区分多修复体和单修复体，1表示多修复体，0表示单修复体
+    // from gpu final_results
+    "mesh_upper": "drc",  // 上颌牙 upper scan
+    "mesh_lower": "drc",  // 下颌牙 lower scan
+    "mesh_kps": "",  // 关键点信息 key points 
+    "all_teeth_seg": "",  // 其他牙齿的 drc 信息 all teeth except for the prep and adjacents
+    // from gpu crown_res
+    "closer": "drc",  // 近中邻牙 misial adjacent tooth
+    "further": "drc",  // 远中邻牙 distal adjacent tooth
+    "beiya_id": "str",  // 备牙牙号 tooth number of the prep
+    "is_single": "int",  // 单邻牙标志 is the prep only has a single adjacent
+    "crown_rot": "list",  // ai变换矩阵
+    "pred_filestem_name": "str",  // 模板文件名称
+    // from front
+    "prep": "drc",  // 备牙 prep tooth
+}
+```
+
+## postprocess
+
+**输入Input**：
+
+```json
+{
+    "multi_restoration": "int",  // 区分多修复体和单修复体，1表示多修复体，0表示单修复体
+    "cpu_std_json": { /* 之前 CPU 的输出 */ }, // Previous CPU output, P.S. "cpu_undercut_json" secretly works here too
+    "standard": "drc",  // 生成牙冠的初始状态，由前端输入 initially placed lib tooth
+    "inner": "drc",  // 备牙，由前端输入 the prep
+    "paras": {
+        "adjust_crown": "int",  //可选，默认值为1。值为0表示不对牙冠做邻接、咬合、厚度调整
+    },  // 其他输入参数，如邻牙间隙距离，粘结剂缝隙大小，牙冠厚度等
+    "crown_rot_matirx": "array", // 初始位置摆放的旋转矩阵 rotation matrix of the initial placement of the lib tooth
+}
+```
+
+## stitch_edge
+
+**输入Input**：
+
+```json
+{
+    "multi_restoration": "int",  // 区分多修复体和单修复体，1表示多修复体，0表示单修复体
+    "out": "drc",  // 修改后的外冠 the outer shell
+    "inner": "drc", // 修改后的备牙
+    "cpu_info_json": { /* 之前 CPU 的输出 */ }, // Previous CPU output
+    "align_edges": "int", //是否进行备牙边缘pruning、胶水缝隙膨胀、内外表面边缘对齐，1表示是，0表示否  whether to enable prep margin pruning, cement gap inflation, and outer margin adaptation. 1 for yes, 0 for no. optional, default at 1.
+    "paras": {"..."},  // 前端传入的参数
+}
+```
+
+# 25年7月22日更新内容
+1、优化倒凹填充中的聚类算法和部分距离阈值。
+2、增加备牙边缘是否处于倒凹阴影中的判断函数。（需要输入带顺序的边缘顶点索引）
+
+# 25年6月25日更新内容
+1、增加缝合冠上外冠、内冠、外冠边缘、内冠边缘顶点标识，分别用0、1、2、3表示
+
 # 25年3月25日更新内容
 
 1、上传新版基于TPS变形的牙冠方向倒凹填充算法。

@@ -55,7 +55,8 @@ def read_drc(file_name):
 
 def compress_drc(mesh, points_id=[]):
     vert_flags = np.zeros(len(mesh.vertices), dtype=np.uint8)
-    vert_flags[points_id] = 1
+    for i in range(len(points_id)):
+        vert_flags[i] = i + 1
     # trimesh.PointCloud(mesh.vertices[points_id]).export('p.ply')
     in_mesh = MQCompressPy.MQC_Mesh()
     in_mesh.verts = MQCompressPy.VerticeArray(mesh.vertices)
@@ -127,12 +128,12 @@ def handler(event, context):
         print("linya_points", event["cpu_info_json"].get("linya_points"))
         occlu_out = occlu(event)
         inner = write_mesh_bytes(occlu_out.mesh_beiya)
-        if len(occlu_out.thickness_face_id):
-            if occlu_out.thick_flag:
+        if occlu_out.thick_flag:
+            if len(occlu_out.thickness_face_id):
                 crown = write_mesh_bytes(occlu_out.mesh_without_thickness)
                 out = write_mesh_bytes(occlu_out.mesh_outside_without_thickness)
                 fixed_points = np.array(occlu_out.thickness_points_id).tolist()
-                fixed_crown = compress_drc(occlu_out.mesh, fixed_points)
+                fixed_crown = compress_drc(occlu_out.mesh, [fixed_points])
                 fixed_out = write_mesh_bytes(occlu_out.mesh_outside)
                 without_thickness_add_points = np.array(
                     occlu_out.without_thickness_add_points
@@ -160,8 +161,7 @@ def handler(event, context):
                     .vertices.tolist()
                 )
             else:
-                fixed_points = np.array(occlu_out.thickness_points_id).tolist()
-                crown = compress_drc(occlu_out.mesh, fixed_points)
+                crown = write_mesh_bytes(occlu_out.mesh)
                 out = write_mesh_bytes(occlu_out.mesh_outside)
                 fixed_crown = ""
                 fixed_out = ""
@@ -208,12 +208,7 @@ def handler(event, context):
             linya_points = np.array(occlu_out.mesh.linya_points.pt).tolist()
         else:
             linya_points = None
-        # occlu_out.mesh_outside_without_thickness.export("mesh_owt.stl")
-        # occlu_out.mesh_without_thickness.export("mesh_wt.stl")
-        # occlu_out.mesh_outside.export("mesh_ot.stl")
-        # occlu_out.mesh.export("mesh_t.stl")
-        # occlu_out.mesh_beiya.export("beiya.stl")
-
+            
         cpu_info_json = {
             "cpu_points_info": {
                 "ad_points": add_points,
@@ -284,10 +279,12 @@ if __name__ == "__main__":
     import os
 
     save_dir = r"test_data_"
-    case_id = "3d4c"
+    case_id = "a933e516-f54d-47eb-94b1-dbc27d723403/occlu_bfec8bf5-6ddf-4af7-81bc-774457e1a7f6"
     with open(os.path.join(save_dir, case_id, "output.json"), "r") as f:
         event = json.load(f)
     s1 = time.time()
+    for k, v in event['cpu_info_json'].items():
+        event[k] = v
     # event["paras"] = {
     #     "occlusal_distance": 0.3,
     #     "ad_gap": 0,
@@ -299,3 +296,4 @@ if __name__ == "__main__":
     print(s2 - s1)
     with open(os.path.join(save_dir, case_id, "occlu_.json"), "w") as f:
         f.write(json.dumps(out["Msg"]["data"]))
+    

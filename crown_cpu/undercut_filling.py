@@ -48,6 +48,14 @@ def handler(event, context):
             "AOI": event.get("AOI"),
             "prep_extended": event.get("prep_extended"),
         }
+        if "cpu_info_json" in event.keys():
+            for k, v in event["cpu_info_json"].items():
+                if k not in event.keys():
+                    event[k] = v
+        elif "cpu_std_json" in event.keys():
+            for k, v in event["cpu_std_json"].items():
+                if k not in event.keys():
+                    event[k] = v
         filling_out = undercut_filling(event)
         # filling_out.mesh_beiya.export(os.path.join(context, 'inner.stl'))
         # filling_out.undercut_mesh.export(os.path.join(context, 'vox.stl'))
@@ -83,24 +91,41 @@ def handler(event, context):
 if __name__ == "__main__":
     import time
     import os
+    import open3d as o3d
 
-    save_dir = r"/home/wanglong/PycharmProjects/lambda_crown/cad_git/download"
+    def read_mesh(path: str) -> o3d.geometry.TriangleMesh:
+        mesh = o3d.io.read_triangle_mesh(path)
+        mesh.compute_vertex_normals()
+        mesh.remove_duplicated_vertices()
+        mesh.remove_degenerate_triangles()
+        mesh.remove_unreferenced_vertices()
+        
+        # 新增网格简化逻辑
+        target_triangles = 8000
+        if len(mesh.triangles) > target_triangles:
+            mesh = mesh.simplify_quadric_decimation(target_triangles)
+        
+        print(len(mesh.vertices))
+        # return mesh
+        return trimesh.Trimesh(mesh.vertices, mesh.triangles, vertex_normals=mesh.vertex_normals, process=False)
+    save_dir = r"test_data_/unercut"
     cases = os.listdir(save_dir)
     for case_id in cases:
-        # case_id = "6550a184-a765-4a94-9500-ad3936327208"
+        case_id = "d8186235-2ea8-4dc6-88d3-4b4ac71a0a09/under_31577ba2-54f5-4d3f-bc40-59420c28a9e8"
         print(case_id)
-        with open(os.path.join(save_dir, case_id, "gpu-step-2-result.json"), "r") as f:
-            event = json.load(f)
+        with open(os.path.join(save_dir, case_id, "output.json"), "r") as f:
+            event = json.load(f)['cpu_input_json']
         s1 = time.time()
         event["AOI_or_UB"] = 1
-        event["inner"] = event["prep"]
+        # event["AOI"] = None
+        # event["inner"] = event["prep"]
         out = handler(event, os.path.join(save_dir, case_id))
         s2 = time.time()
         print(s2 - s1)
-        event['inner'] = out["Msg"]["data"]['inner']
+        # event['inner'] = out["Msg"]["data"]['inner']
         with open(os.path.join(save_dir, case_id, "undercut_filling_out.json"), "w") as f:
-            f.write(json.dumps(event))
-        # break
+            f.write(json.dumps(out))
+        break
     
     # save_dir = 'test_data_'
     # case_id = '3c8a'
