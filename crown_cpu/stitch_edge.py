@@ -17,6 +17,14 @@ def read_mesh_bytes(buffer):
     F = np.array(mesh_object.faces).astype(np.int64).reshape(-1, 3)
     return trimesh.Trimesh(V, F)
 
+def read_mesh_bytes_unit16(buffer):
+    a = base64.b64decode(buffer)
+    mesh_object = DracoPy.decode_buffer_to_mesh(a)
+    V = np.array(mesh_object.points).astype(np.float32).reshape(-1, 3)
+    F = np.array(mesh_object.faces).astype(np.int64).reshape(-1, 3)
+    flag = mesh_object.attributes[1]['data'].reshape(-1)
+    return trimesh.Trimesh(V, F), flag
+
 
 def write_mesh_bytes(mesh, preserve_order=False, colors=None):
     # 设置 Draco 编码选项
@@ -55,6 +63,17 @@ def compress_drc(mesh, points_id=[]):
     else:
         assert "drc compress error"
 
+def decompress_drc(compressed_data):
+    compressed_data = base64.b64decode(compressed_data)
+    out_mesh = MQCompressPy.MQC_Mesh()
+    out_flags = MQCompressPy.VerticeFlag_UINT8()
+    out_mesh_, out_flags, error_code = MQCompressPy.decompressMesh_UINT8(
+        compressed_data
+    )
+    out_mesh = trimesh.Trimesh()
+    out_mesh.vertices = out_mesh_.verts
+    out_mesh.faces = out_mesh_.faces
+    return out_mesh, out_flags
 
 def write_drc(drc, file):
     with open(file, "wb") as test_file:
@@ -113,23 +132,35 @@ def handler(event, context):
             inner.apply_transform(event["ai_matrix"])
             event["inner"] = write_mesh_bytes(inner)
 
-            out = read_mesh_bytes(event["out"])
+            # out, occ_id = decompress_drc(event["out"])
+            out, occ_id = read_mesh_bytes_unit16(event["out"])
             out.apply_transform(event["new_transform_list"][1])
             out.apply_transform(event["new_transform_list"][0])
             out.apply_transform(event["new_transform_list"][2])
             out.apply_transform(event["ai_matrix"])
-            event["out"] = write_mesh_bytes(out)
+            event["out"] = out
+            event["occ_id"] = np.where(np.array(occ_id) == 4)[0]
 
         stitch_out = stitch_edge(event)
-        crown = compress_drc(
-            stitch_out.mesh,
-            [
-                stitch_out.points_inner_id,
-                stitch_out.points_edge_outer_id,
-                stitch_out.points_edge_inner_id,
-                # stitch_out.points_edge_id,
-            ],
-        )
+        if len(stitch_out.occ_id):
+            crown = compress_drc(
+                stitch_out.mesh,
+                [
+                    stitch_out.points_inner_id,
+                    stitch_out.points_edge_outer_id,
+                    stitch_out.points_edge_inner_id,
+                    stitch_out.mesh.occ_id.idx
+                ],
+            )
+        else:
+            crown = compress_drc(
+                stitch_out.mesh,
+                [
+                    stitch_out.points_inner_id,
+                    stitch_out.points_edge_outer_id,
+                    stitch_out.points_edge_inner_id,
+                ],
+            )
         inner = write_mesh_bytes(stitch_out.mesh_beiya)
         thickness_shell = write_mesh_bytes(stitch_out.thickness_shell)
 
@@ -144,15 +175,25 @@ def handler(event, context):
             stitch_out.mesh.apply_transform(
                 np.linalg.pinv(event["new_transform_list"][1])
             )
-            crown = compress_drc(
-                stitch_out.mesh,
-                [
-                    stitch_out.points_inner_id,
-                    stitch_out.points_edge_outer_id,
-                    stitch_out.points_edge_inner_id,
-                    # stitch_out.points_edge_id,
-                ],
-            )
+            if len(stitch_out.occ_id):
+                crown = compress_drc(
+                    stitch_out.mesh,
+                    [
+                        stitch_out.points_inner_id,
+                        stitch_out.points_edge_outer_id,
+                        stitch_out.points_edge_inner_id,
+                        stitch_out.mesh.occ_id.idx
+                    ],
+                )
+            else:
+                crown = compress_drc(
+                    stitch_out.mesh,
+                    [
+                        stitch_out.points_inner_id,
+                        stitch_out.points_edge_outer_id,
+                        stitch_out.points_edge_inner_id,
+                    ],
+                )
 
             stitch_out.mesh_beiya.apply_transform(np.linalg.pinv(event["ai_matrix"]))
             stitch_out.mesh_beiya.apply_transform(
@@ -185,6 +226,8 @@ def handler(event, context):
             "inner": inner,
             "thickness_shell": thickness_shell,
             "cpu_input_json": cpu_input_json,
+            "self_intersecting": stitch_out.self_intersecting,
+            "thick_shell_hit": stitch_out.colloision
         }
         print("suncess stitch_edge")
 
@@ -223,14 +266,29 @@ if __name__ == "__main__":
     #     with open(f'{path}/{case}/{stitch_file}/stitch_edge.json', "w") as f:
     #         f.write(json.dumps(out["Msg"]["data"]))
     #     break
-    with open("test_data_/muti_crown/response.json", "r") as f:
-        event_gpu = json.load(f)["Msg"]["data"]
+    # with open("test_data_/muti_crown/response.json", "r") as f:
+    #     event_gpu = json.load(f)["Msg"]["data"]
 
-    with open("test_data_/muti_crown/post.json", "r") as f:
+    # with open("test_data_/muti_crown/post.json", "r") as f:
+    #     event = json.load(f)
+
+    # event["multi_restoration"] = True
+    # out = handler(event, "")
+
+    # with open("test_data_/muti_crown/stitch.json", "w") as f:
+    #     f.write(json.dumps(out["Msg"]["data"]))
+    # with open("test_data_/test/input.json", "r") as f:
+    #     event = json.load(f)
+    # with open("test_data_/test/output.json", "r") as f:
+    #     event_ = json.load(f)
+    # event["out"] = event_["out"]
+    # event["mesh_jaw"] = event_["cpu_std_json"]["mesh_jaw"]
+    # event["test"] = True
+    # event["save_path"] = "test_data_/test"
+    # out = handler(event, "")
+    with open("/home/wanglong/下载/data/8/crown_stitch_edge (1).json", "r") as f:
         event = json.load(f)
-
-    event["multi_restoration"] = True
+    event["test"] = True
+    event["save_path"] = "/home/wanglong/下载/data/8"
     out = handler(event, "")
-
-    with open("test_data_/muti_crown/stitch.json", "w") as f:
-        f.write(json.dumps(out["Msg"]["data"]))
+    

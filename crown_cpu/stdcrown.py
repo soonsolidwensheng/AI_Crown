@@ -18,18 +18,21 @@ def read_mesh_bytes(buffer):
 
 
 def write_mesh_bytes(mesh, colors=None, preserve_order=False):
-    # 设置 Draco 编码选项
-    encoding_test = DracoPy.encode_mesh_to_buffer(
-        mesh.vertices,
-        mesh.faces,
-        preserve_order=preserve_order,
-        quantization_bits=14,
-        compression_level=10,
-        colors=colors,
-    )
-    b64_bytes = base64.b64encode(encoding_test)
-    b64_str = b64_bytes.decode("utf-8")
-    return b64_str
+    if mesh:
+        # 设置 Draco 编码选项
+        encoding_test = DracoPy.encode_mesh_to_buffer(
+            mesh.vertices,
+            mesh.faces,
+            preserve_order=preserve_order,
+            quantization_bits=14,
+            compression_level=10,
+            colors=colors,
+        )
+        b64_bytes = base64.b64encode(encoding_test)
+        b64_str = b64_bytes.decode("utf-8")
+        return b64_str
+    else:
+        return ""
 
 
 def write_drc(drc, file):
@@ -157,7 +160,7 @@ def get_kps_and_crowns(miss_id, kps_info, seg_crowns):
             for key in keys_6_7:
                 pt1.append(pt1_dic[key])
 
-    kps = {}
+    kps = {'arch':{'teeth_keypoints': {}}}
     all_other_crowns = {}
     for i in list(kps_info.keys()):
         keys = {}
@@ -177,20 +180,20 @@ def get_kps_and_crowns(miss_id, kps_info, seg_crowns):
         elif i[-1] in ["6", "7"]:
             for key in keys_6_7:
                 keys[key] = kps_info[i][key]
-        kps[i] = keys
+        kps['arch']['teeth_keypoints'][i] = keys
 
         all_other_crowns[i] = seg_crowns.get(i)
     return kps, all_other_crowns, pt1, pt2
 
 
-def handler(event, context):
+def handler(event, context=None):
     print("receive case")
     try:
         input_info = event
         if input_info.get("multi_restoration"):
             input_info["ai_matrix"] = matrix2matrix(input_info["crown_rot"])
             kps_info = {}
-            for k, v in input_info["mesh_kps"].items():
+            for _, v in input_info["mesh_kps"].items():
                 kps_info = {**kps_info, **v["teeth_keypoints"]}
             seg_crowns = {}
             for k, v in input_info["all_teeth_seg"].items():
@@ -310,6 +313,7 @@ def handler(event, context):
                 # cpu_points_info[key] = points.idx.tolist()
         cpu_points_info_backup = {}
         cpu_colors_info_backup = {}
+        std_out.mesh_backup = std_out.mesh.copy()
         colors_backup = np.zeros_like(std_out.mesh_backup.vertices, dtype=np.uint8)
         points_keys = [
             x for x in vars(std_out.mesh) if x not in vars(trimesh.Trimesh())
@@ -475,15 +479,17 @@ if __name__ == "__main__":
     # with open(os.path.join(path, dir, "error_list.txt"), "w") as f:
     #     f.write("\n".join(error_list))
     with open(
-        "test_data_/muti_crown/response.json",
+        "test_data_/muti_crown/dev/0820/crown_standard.json",
         "r",
     ) as f:
-        data = json.load(f)["Msg"]["data"]
+        data = json.load(f)
     # data["multi_restoration"] = True
-    data["beiya_id"] = "47"
+    # data["beiya_id"] = "14"
 
-    for k, v in data["crown_res"][data["beiya_id"]].items():
-        data[k] = v
+    # for k, v in data["crown_res"][data["beiya_id"]].items():
+    #     data[k] = v
+    data['test'] = True
+    data['save_path'] = r'test_data_/muti_crown/dev/0820/std'
     out = handler(data, "")
-    with open('test_data_/muti_crown/std.json', 'w') as f:
+    with open('test_data_/muti_crown/dev/std.json', 'w') as f:
         f.write(json.dumps(out["Msg"]["data"]))

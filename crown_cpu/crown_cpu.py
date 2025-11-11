@@ -3,16 +3,15 @@ import copy
 import json
 import os
 import random
+from typing import List
 
 import DracoPy
 import networkx as nx
 import numpy as np
 import open3d as o3d
 import pylfda
+import pymeshlab
 import trimesh
-import trimesh.boolean
-import trimesh.remesh
-import trimesh.repair
 from pytransform3d.rotations import matrix_from_two_vectors
 from scipy.spatial import KDTree, transform
 
@@ -21,6 +20,7 @@ import pypruners
 from dental_arch_curve import DAC
 from directional_undercut_filling import filling_undercut
 from find_thickness_points import find_changed_faces, find_subdivided_faces
+from pre_op_mirror import mirror_crown, pre_op
 from tps import tps
 from tracked_trimesh import TrackedTrimesh
 from undercut_util import get_insert_direction
@@ -29,7 +29,7 @@ from undercut_util import get_insert_direction
 
 
 def read_mesh_bytes(buffer):
-    if buffer is None:
+    if buffer is None or buffer == '':
         return None
     a = base64.b64decode(buffer)
     mesh_object = DracoPy.decode_buffer_to_mesh(a)
@@ -189,6 +189,10 @@ def get_biggest_mesh(mesh):
     """
     获取备牙里最大的连通区
     """
+    if type(mesh) is trimesh.Trimesh or type(mesh) is TrackedTrimesh:
+        pass
+    else:
+        mesh = trimesh.Trimesh(mesh.vertices, mesh.triangles)
     mesh_split = mesh.split(only_watertight=False)
     mesh = mesh_split[np.argmax(np.array([x.vertices.shape[0] for x in mesh_split]))]
     return mesh
@@ -368,6 +372,10 @@ def getBoundSet(mesh):
 
 
 def boundarySmooth(mesh):
+    if type(mesh) is trimesh.Trimesh or type(mesh) is TrackedTrimesh:
+        pass
+    else:
+        mesh = trimesh.Trimesh(mesh.vertices, mesh.triangles)
     unique_elements, counts = np.unique(mesh.edges_sorted, return_counts=True, axis=0)
     edges = unique_elements[np.where(counts == 1)[0]]
     sorted_edges = arrange_edges(edges)
@@ -395,7 +403,7 @@ def arrange_edges(edges):
                 edges.pop(i)
                 break
         else:
-            break  # 找不到连接的边，退出
+            break  # 找不到连接的边,退出
 
     return np.array(result)
 
@@ -587,6 +595,13 @@ def compute_signed_distance(mesh, q_points):
     return distance, closest_points["points"].numpy()
 
 
+def get_cycles(edges: List[List[int]], N: int) -> List[List[int]]:
+    G = nx.Graph()  # Example undirected graph
+    G.add_edges_from(edges)
+    basis_cycles = nx.cycle_basis(G)
+    return basis_cycles
+
+
 def find_boundaries(mesh):
     if type(mesh) is trimesh.Trimesh or type(mesh) is TrackedTrimesh:
         mesh_o3d = mesh.as_open3d
@@ -595,16 +610,26 @@ def find_boundaries(mesh):
     a = mesh_o3d.get_non_manifold_edges(allow_boundary_edges=True)
     b = mesh_o3d.get_non_manifold_edges(allow_boundary_edges=False)
     a = np.unique(np.asarray(a).flatten())
-    b = np.unique(np.asarray(b).flatten())
+    b = np.asarray(b)
+    N = int(np.amax(b.flatten()))
+    bound_edges = [list(edge) for edge in b]
+    cycles = get_cycles(bound_edges, N)
+    longest_cycle = max(cycles, key=len)
+    b = np.unique(np.asarray(longest_cycle).flatten())
+
     out = b[~np.isin(b, a)]
 
     return np.asarray(mesh.vertices)[out], out
     # out = np.asarray(b)[~np.isin(np.asarray(b)[:,0], np.asarray(a)[:,0]) | ~np.isin(np.asarray(b)[:,1], np.asarray(a)[:,1])]
     # return mesh.vertices[out.flatten()], out.flatten()
-    
+
 
 def getBoundaryPoints(mesh):
     """get the boundary points of a mesh IN THE ORDER of how they appear in the mesh"""
+    if type(mesh) is trimesh.Trimesh or type(mesh) is TrackedTrimesh:
+        pass
+    else:
+        mesh = trimesh.Trimesh(mesh.vertices, mesh.triangles)
     unique_elements, counts = np.unique(mesh.edges_sorted, return_counts=True, axis=0)
     edges = unique_elements[np.where(counts == 1)[0]]
     boundary_point_id = np.unique(edges.flatten())
@@ -646,19 +671,18 @@ def find_closest_values(arr, target):
     return closest_smaller, closest_larger
 
 
-def get_thickness_gap(mesh_input, mesh_crown):
+def get_thickness_gap(mesh_input, mesh_crown=None):
     """
-    备牙膨胀,用于留出填充间隙。
+    备牙膨胀,用于留出厚度间隙。
     首先修复网格的法线,然后遍历网格的每个顶点。
     对于每个顶点,计算其法线和相邻顶点的法线,如果角度大于60度,不对该点做调整。
     反之,使用法线移动该顶点。
-    处理所有顶点后,使用TPS对网格进行重采样。
-
+    处理所有顶点后,使用TPS对网格进行变形。
     """
     mesh_inner = copy.deepcopy(mesh_input)
-    mesh_inner.invert()
+    # mesh_inner.invert()
     if mesh_inner.faces.shape[0] > 10000:
-        desired_count = 5000
+        desired_count = 8000
         mesh = pylfda.Mesh()
         mesh.vertices, mesh.faces = mesh_inner.vertices, mesh_inner.faces
         decimationType = pylfda.DecimationType.Vertex
@@ -731,10 +755,14 @@ def get_thickness_gap(mesh_input, mesh_crown):
             else:
                 v_n = a
                 points.append(mesh_inner.vertices[k] + v_n * 0.55)
-    points_id = random.sample(
-        [x for x in range(len(mesh_inner.vertices)) if x not in k_p],
-        len(mesh_inner.vertices) // 3,
-    )
+    id_not_in_kp = [x for x in range(len(mesh_inner.vertices)) if x not in k_p]
+    if len(id_not_in_kp) < len(mesh_inner.vertices) // 3:
+        points_id = random.sample(
+            id_not_in_kp,
+            len(mesh_inner.vertices) // 3,
+        )
+    else:
+        points_id = id_not_in_kp
     points_id = [x for x in points_id if x not in n]
     points_id.extend(k_p)
     points_tps = np.array(points)[points_id]
@@ -749,29 +777,33 @@ def get_thickness_gap(mesh_input, mesh_crown):
         p_id = np.hstack([p_id, o_n])
         p = np.vstack([p, mesh_beiya.vertices[o_n]])
         not_in_p_id = [x for x in range(len(mesh_beiya.vertices)) if x not in p_id]
-        n_p_id = random.sample(not_in_p_id, len(not_in_p_id) // 5)
+        if len(not_in_p_id) < len(not_in_p_id) // 5:
+            n_p_id = random.sample(not_in_p_id, len(not_in_p_id) // 5)
+        else:
+            n_p_id = not_in_p_id
         p_id = np.hstack([p_id, n_p_id])
         p = np.vstack([p, mesh_beiya.vertices[n_p_id]])
         thickness_shell = tps(mesh_beiya, p_id, p)
     else:
         thickness_shell = mesh_beiya
     thickness_shell.vertices[outlines_nrighbor] = np.array(points)[outlines_nrighbor]
-    # scene = o3d.t.geometry.RaycastingScene()
-    # scene.add_triangles(o3d.t.geometry.TriangleMesh.from_legacy(mesh_crown.as_open3d))
-    # in_mesh = scene.compute_occupancy(
-    #     np.array(thickness_shell.vertices, dtype=np.float32)
-    # )
-    # dis_id = np.where(in_mesh.numpy() == 0)[0]
-    # if len(dis_id):
-    #     p = scene.compute_closest_points(
-    #         np.array(thickness_shell.vertices[dis_id], dtype=np.float32)
-    #     )["points"].numpy()
-    #     thickness_shell.vertices[dis_id] = thickness_shell.vertices[dis_id] + 1.3 * (
-    #         p - thickness_shell.vertices[dis_id]
-    #     )
+
     t_o3d = thickness_shell.as_open3d
     t_o3d.remove_vertices_by_index(outlines)
     thickness_shell = trimesh.Trimesh(t_o3d.vertices, t_o3d.triangles)
+    if mesh_crown is not None:
+        c = trimesh.collision.CollisionManager()
+        c.add_object("shell", thickness_shell)
+        c.add_object("mesh", mesh_crown)
+        contace_data = c.in_collision_internal(return_data=True)
+        inside_face_id = []
+        if contace_data[0]:
+            for data in contace_data[1]:
+                inside_face_id.append(data.index("shell"))
+            t_o3d = thickness_shell.as_open3d
+            t_o3d.remove_triangles_by_index(np.unique(inside_face_id))
+            thickness_shell = trimesh.Trimesh(t_o3d.vertices, t_o3d.triangles)
+
     return thickness_shell
 
 
@@ -817,7 +849,7 @@ def transform_method(
     mesh_beiya:备牙
     all_other_crowns_number:识别到的牙齿个数（不包括备牙）
     miss_id:备牙牙号
-    is_single:是否是单邻牙，0表示双邻牙，1表示缺少近中邻牙，2表示缺少远中邻牙
+    is_single:是否是单邻牙,0表示双邻牙,1表示缺少近中邻牙,2表示缺少远中邻牙
     pt1:近中邻牙kps
     pt2:远中邻牙kps
     """
@@ -833,13 +865,29 @@ def transform_method(
     dac_point = None
     if is_single in [1, 2] and all_other_crowns_number > 9:
         dac_point = 1
-    # 变换坐标以便调整与邻牙和对牙的位置
+
     if int(miss_id) in [17, 27, 37, 47] and dac_point is None:
         axis_centroid = copy.deepcopy(mesh_beiya.centroid)
         axis_centroid[1] = mesh1.centroid[1]
         axis_x = mesh1.centroid - axis_centroid
+    elif is_single == 1:
+        axis_centroid = copy.deepcopy(mesh_beiya.centroid)
+        axis_centroid[1] = mesh2.centroid[1]
+        axis_x = axis_centroid - mesh2.centroid
+    elif is_single == 2:
+        axis_centroid = copy.deepcopy(mesh_beiya.centroid)
+        axis_centroid[1] = mesh1.centroid[1]
+        # axis_x = axis_centroid - mesh1.centroid
+        axis_x = mesh1.centroid - axis_centroid
     else:
         axis_x = mesh1.centroid - mesh2.centroid
+    # 变换坐标以便调整与邻牙和对牙的位置
+    # if int(miss_id) in [17, 27, 37, 47] and dac_point is None:
+    #     axis_centroid = copy.deepcopy(mesh_beiya.centroid)
+    #     axis_centroid[1] = mesh1.centroid[1]
+    #     axis_x = mesh1.centroid - axis_centroid
+    # else:
+    #     axis_x = mesh1.centroid - mesh2.centroid
     if up_low:
         rotation_matrix = np.matrix(
             matrix_from_two_vectors(axis_x, np.array([0, 1, 0]))
@@ -856,11 +904,130 @@ def transform_method(
     )
     matrix = np.eye(4)
     matrix[:3, 3] = mesh_beiya.centroid * -1
-    m = None
-    if pt1 and pt2:
-        pt1.apply_transform(rotation_matrix @ matrix)
-        pt2.apply_transform(rotation_matrix @ matrix)
-        m = get_matrix(pt1, pt2)
+    m = np.eye(4)
+    # if pt1 and pt2:
+    #     pt1.apply_transform(rotation_matrix @ matrix)
+    #     pt2.apply_transform(rotation_matrix @ matrix)
+    #     m = get_matrix(pt1, pt2)
+    return np.array([rotation_matrix @ matrix, m]), [
+        rotation_matrix.tolist(),
+        matrix.tolist(),
+        m.tolist(),
+    ]
+
+
+def find_closest_numbers(x, keys):
+    """
+    在给定的键中查找最接近x的两个数字,一个比x大,一个比x小,且第一位相同
+
+    参数:
+        x: 目标数字
+        keys: 键的列表
+
+    返回:
+        tuple: (小于x的最接近数字, 大于x的最接近数字)
+    """
+    # 将字符串键转换为整数
+    numbers = [int(k) for k in keys]
+    # 获取x的第一位数字
+    x_first_digit = int(str(x)[0])
+
+    # 筛选出第一位数字相同的数字
+    same_first_digit = [n for n in numbers if int(str(n)[0]) == x_first_digit]
+
+    if not same_first_digit:
+        return None, None
+
+    # 分别找出小于和大于x的数字
+    smaller = [n for n in same_first_digit if n < x]
+    larger = [n for n in same_first_digit if n > x]
+
+    # 找出最接近的数字
+    closest_smaller = max(smaller) if smaller else None
+    closest_larger = min(larger) if larger else None
+
+    # 检查个位数是否为1或2
+    if closest_smaller is not None and int(str(closest_smaller)[-1]) in [1, 2]:
+        closest_smaller = None
+    if closest_larger is not None and int(str(closest_larger)[-1]) in [1, 2]:
+        closest_larger = None
+
+    return closest_smaller, closest_larger
+
+
+def transform_method_(
+    mesh_beiya: trimesh.Trimesh,
+    all_other_crowns: dict,
+    miss_id: str,
+    is_single: int,
+    pt1: List,
+    pt2: List,
+) -> np.array:
+    """
+    mesh_beiya:备牙
+    all_other_crowns:识别到的其他牙齿（不包括备牙）
+    miss_id:备牙牙号
+    is_single:是否是单邻牙,0表示双邻牙,1表示缺少近中邻牙,2表示缺少远中邻牙, 3表示无邻牙
+    pt1:近中邻牙kps
+    pt2:远中邻牙kps
+    """
+    # mesh1 = trimesh.Trimesh(mesh1[0], mesh1[1])
+    # mesh2 = trimesh.Trimesh(mesh2[0], mesh2[1])
+    # mesh_beiya = trimesh.Trimesh(mesh_beiya[0], mesh_beiya[1])
+    
+    if int(miss_id) < 30:
+        up_low = 0  # up
+    else:
+        up_low = 1  # low
+
+    mesh1_id, mesh2_id = find_closest_numbers(int(miss_id), all_other_crowns.keys())
+    if mesh1_id is None:
+        if mesh2_id is None:
+            # extreme case: only one tooth detected
+            return np.identity(4), [
+                np.identity(4).tolist(),
+                np.identity(4).tolist(),
+                np.identity(4).tolist(),
+            ]
+        else:
+            mesh2 = read_mesh_bytes(all_other_crowns[str(mesh2_id)])
+            axis_centroid = copy.deepcopy(mesh_beiya.centroid)
+            axis_centroid[1] = mesh2.centroid[1]
+            axis_x = axis_centroid - mesh2.centroid
+    else:
+        mesh1 = read_mesh_bytes(all_other_crowns[str(mesh1_id)])
+        if mesh2_id is None:
+            axis_centroid = copy.deepcopy(mesh_beiya.centroid)
+            axis_centroid[1] = mesh1.centroid[1]
+            # axis_x = axis_centroid - mesh1.centroid
+            axis_x = mesh1.centroid - axis_centroid
+        else:
+            mesh2 = read_mesh_bytes(all_other_crowns[str(mesh2_id)])
+            axis_x = mesh1.centroid - mesh2.centroid
+    if up_low:
+        rotation_matrix = np.matrix(
+            matrix_from_two_vectors(axis_x, np.array([0, 1, 0]))
+        ).I.__array__()
+    else:
+        rotation_matrix = np.matrix(
+            matrix_from_two_vectors(axis_x, np.array([0, -1, 0]))
+        ).I.__array__()
+    rotation_matrix = np.vstack(
+        (
+            np.hstack((rotation_matrix, np.zeros(3).reshape(-1, 1))),
+            np.zeros(4).reshape(1, -1),
+        )
+    )
+    matrix = np.eye(4)
+    matrix[:3, 3] = mesh_beiya.centroid * -1
+    m = np.eye(4)
+    if is_single != 3:
+        if pt1 and pt2:
+            pt1 = trimesh.PointCloud(pt1)
+            pt2 = trimesh.PointCloud(pt2)
+            pt1.apply_transform(rotation_matrix @ matrix)
+            pt2.apply_transform(rotation_matrix @ matrix)
+            m = get_matrix(pt1, pt2)
     return np.array([rotation_matrix @ matrix, m]), [
         rotation_matrix.tolist(),
         matrix.tolist(),
@@ -934,6 +1101,412 @@ def merge_close_vertices(mesh, threshold):
     return new_mesh
 
 
+def sort_and_remove_close_points(points, threshold=0.5):
+    """
+    Sorts a set of 3D points that form an irregular closed curve and removes points that are too close to each other.
+    Returns the indices of the sorted points.
+
+    Parameters
+    ----------
+    points : (n, 3) float
+        Array of 3D points.
+    threshold : float, optional
+        Minimum distance between points (default is 0.5).
+
+    Returns
+    -------
+    sorted_indices : (m,) int
+        Indices of the sorted points with close points removed.
+    """
+    # Initialize the sorted indices list with the index of the first point
+    sorted_indices = [0]
+    remaining_indices = list(range(1, len(points)))
+
+    while remaining_indices:
+        # Get the last point in the sorted list
+        last_point = points[sorted_indices[-1]]
+
+        # Calculate distances from the last point to all remaining points
+        remaining_points = points[remaining_indices]
+        distances = np.linalg.norm(remaining_points - last_point, axis=1)
+
+        # Find the index of the closest point
+        closest_index = np.argmin(distances)
+        closest_distance = distances[closest_index]
+
+        # Check if the closest point is too close
+        if closest_distance > threshold:
+            # Add the index of the closest point to the sorted list
+            sorted_indices.append(remaining_indices[closest_index])
+            # Remove the closest point from the remaining indices
+            del remaining_indices[closest_index]
+        else:
+            # If the closest point is too close, remove it and continue
+            del remaining_indices[closest_index]
+
+    return np.array(sorted_indices)
+
+
+def compute_distances(A, B):
+    distances_0 = np.sqrt(
+        np.sum((A[:, np.newaxis, :1, :] - B[np.newaxis, :, :, :]) ** 2, axis=3)
+    )
+    distance_sums_0 = np.sum(distances_0, axis=2)
+    closest_indices_0 = np.argmin(distance_sums_0, axis=1)
+    distances_1 = np.sqrt(
+        np.sum((A[:, np.newaxis, 1:, :] - B[np.newaxis, :, :, :]) ** 2, axis=3)
+    )
+    distance_sums_1 = np.sum(distances_1, axis=2)
+    closest_indices_1 = np.argmin(distance_sums_1, axis=1)
+    return np.column_stack((closest_indices_0, closest_indices_1))
+
+
+def stitch_(mesh_to_stitch, mesh_before_stitch, edge_after, type="inner"):
+    """
+    mesh_to_stitch: 待缝合的mesh
+    mesh_before_stitch: 缝合前的mesh
+    edge_after: mesh_after_o3d的边缘索引 (n, 2) int
+    type: "inner" or "outer", default is "inner"
+    """
+    while True:
+        mesh_to_stitch_bound, mesh_to_stitch_bound_id = getBoundaryPoints(
+            mesh_to_stitch
+        )
+        mesh_to_stitch_trimesh = trimesh.Trimesh(
+            mesh_to_stitch.vertices, mesh_to_stitch.triangles
+        )
+        mask = np.isin(
+            mesh_to_stitch_trimesh.edges_unique, mesh_to_stitch_bound_id
+        ).all(axis=1)
+        bad_points_info = np.unique(
+            mesh_to_stitch_trimesh.edges_unique[mask], return_counts=True
+        )
+        bad_points = bad_points_info[0][np.where(bad_points_info[1] >= 4)[0]]
+        if len(bad_points):
+            mesh_to_stitch.remove_vertices_by_index(bad_points)
+            mesh_to_stitch = get_biggest_mesh(mesh_to_stitch).as_open3d
+            mesh_to_stitch_bound, mesh_to_stitch_bound_id = getBoundaryPoints(
+                mesh_to_stitch
+            )
+            mesh_to_stitch_trimesh = trimesh.Trimesh(
+                mesh_to_stitch.vertices, mesh_to_stitch.triangles
+            )
+        mesh_to_stitch_sort_idx = sort_and_remove_close_points(mesh_to_stitch_bound, 0)
+        mesh_to_stitch_bound = mesh_to_stitch_bound[mesh_to_stitch_sort_idx]
+        mesh_to_stitch_bound_id = mesh_to_stitch_bound_id[mesh_to_stitch_sort_idx]
+        mesh_to_stitch_edge = [
+            [mesh_to_stitch_bound_id[x], mesh_to_stitch_bound_id[x + 1]]
+            if x < len(mesh_to_stitch_bound_id) - 1
+            else [mesh_to_stitch_bound_id[x], mesh_to_stitch_bound_id[0]]
+            for x in range(len(mesh_to_stitch_bound_id))
+        ]
+
+        mask = (
+            (
+                mesh_to_stitch_trimesh.edges[:, None]
+                == np.array(mesh_to_stitch_edge)[:, ::-1]
+            )
+            .all(axis=2)
+            .any(axis=0)
+        )
+        if np.sum(mask) < len(mask) // 2:
+            mask = (
+                (mesh_to_stitch_trimesh.edges[:, None] == np.array(mesh_to_stitch_edge))
+                .all(axis=2)
+                .any(axis=0)
+            )
+        counts_a = np.unique(
+            np.array(mesh_to_stitch_edge)[~mask].flatten(), return_counts=True
+        )
+        counts_b = np.unique(mesh_to_stitch_trimesh.faces, return_counts=True)
+        bad_points = counts_a[0][np.where(counts_b[1][counts_a[0]] < 3)[0]]
+
+        dist_index = compute_distances(
+            np.asarray(mesh_to_stitch.vertices)[mesh_to_stitch_edge],
+            mesh_before_stitch.vertices[edge_after],
+        )
+
+        if len(bad_points):
+            mesh_to_stitch.remove_vertices_by_index(bad_points)
+            mesh_to_stitch = get_biggest_mesh(mesh_to_stitch).as_open3d
+            continue
+
+        bad_bound_idx_0 = [
+            mesh_to_stitch_edge[id][1]
+            for id, x in enumerate(dist_index)
+            if x[0] > x[1] and x[0] != np.max(dist_index)
+        ]
+        bad_bound_idx_1 = [
+            mesh_to_stitch_edge[id][1]
+            for id, x in enumerate(dist_index)
+            if x[0] < x[1] and x[1] != np.max(dist_index)
+        ]
+        if len(bad_bound_idx_0) > len(bad_bound_idx_1):
+            bad_bound_idx = bad_bound_idx_1
+            dist_index = dist_index[::-1, ::-1]
+            mesh_to_stitch_edge = np.array(mesh_to_stitch_edge)[::-1, ::-1]
+        else:
+            bad_bound_idx = bad_bound_idx_0
+        if len(bad_bound_idx) == 0:
+            break
+        mesh_to_stitch.remove_vertices_by_index(bad_bound_idx)
+        mesh_to_stitch = get_biggest_mesh(mesh_to_stitch).as_open3d
+    mesh_to_stitch = trimesh.Trimesh(
+        vertices=mesh_to_stitch.vertices, faces=mesh_to_stitch.triangles
+    )
+
+    # if type == "inner":
+    #     mesh_to_stitch.export(f"{save_path}/inner_new.stl")
+    # else:
+    #     mesh_to_stitch.export(f"{save_path}/outer_new.stl")
+
+    new_faces = []
+    used_egges = []
+    for edge_idx, (i_0, i_1) in enumerate(dist_index):
+        p0 = mesh_to_stitch_edge[edge_idx][0] + len(mesh_before_stitch.vertices)
+        p1 = mesh_to_stitch_edge[edge_idx][1] + len(mesh_before_stitch.vertices)
+        b_0_0 = edge_after[i_0][0]
+        b_0_1 = edge_after[i_0][1]
+        if i_0 != i_1:
+            if (i_0 - i_1) > np.max(len(edge_after)) // 2:
+                i_list = [x for x in range(i_0, len(edge_after), 1)]
+                i_list.extend([x for x in range(0, i_1 + 1, 1)])
+            else:
+                i_list = [x for x in range(i_0 + 1, i_1 + 1, 1)]
+            mask = np.isin(i_list, used_egges, invert=True)
+            i_list = np.array(i_list)[mask]
+            if len(i_list) == 0:
+                new_faces.append([p1, p0, b_0_1])
+                continue
+            # outer_points = mesh_before_stitch.vertices[edge_after[i_list]]
+            outer_points = mesh_before_stitch.vertices[np.unique(edge_after[i_list])]
+            p0_point = mesh_to_stitch.vertices[p0 - len(mesh_before_stitch.vertices)]
+            p1_point = mesh_to_stitch.vertices[p1 - len(mesh_before_stitch.vertices)]
+            # dis_p0 = np.linalg.norm(p0_point - outer_points, axis=2)
+            # dis_p1 = np.linalg.norm(p1_point - outer_points, axis=2)
+            dis_p0 = np.linalg.norm(p0_point - outer_points, axis=1)
+            dis_p1 = np.linalg.norm(p1_point - outer_points, axis=1)
+            min_idx = np.argmin(dis_p0 + dis_p1)
+            for p_id, list_id in enumerate(i_list):
+                b0 = edge_after[list_id][0]
+                b1 = edge_after[list_id][1]
+                if p_id < min_idx:
+                    new_faces.append([p0, b0, b1])
+                elif p_id >= min_idx:
+                    new_faces.append([p1, b0, b1])
+                used_egges.append(list_id)
+            if min_idx == len(i_list):
+                new_faces.append([p1, p0, edge_after[i_list[-1]][1]])
+            else:
+                new_faces.append([p1, p0, edge_after[i_list[min_idx]][0]])
+        else:
+            if edge_idx == len(dist_index) - 1:
+                if len(used_egges):
+                    if used_egges[0] == i_0:
+                        new_faces.append([p1, p0, b_0_0])
+                    else:
+                        new_faces.append([p1, p0, b_0_1])
+                else:
+                    new_faces.append([p1, p0, b_0_1])
+            elif i_0 == np.max(dist_index):
+                new_faces.append([p1, p0, b_0_0])
+            else:
+                new_faces.append([p1, p0, b_0_1])
+
+    if type == "outer":
+        new_faces = np.array(new_faces)
+        new_faces[:, :2] = new_faces[:, :2][:, ::-1]
+    model_stitched = trimesh.Trimesh(
+        np.concatenate((mesh_before_stitch.vertices, mesh_to_stitch.vertices), axis=0),
+        np.concatenate(
+            (
+                mesh_before_stitch.faces,
+                mesh_to_stitch.faces + len(mesh_before_stitch.vertices),
+                new_faces,
+            ),
+            axis=0,
+        ),
+        process=False,
+    )
+    return model_stitched, mesh_to_stitch_bound_id + len(mesh_before_stitch.vertices)
+
+
+def stitch_edge_new(mesh_out, mesh_inner):
+    bound_out_ori, bound_out_id_ori = getBoundaryPoints(mesh_out)
+    bound_out_sort_idx = sort_and_remove_close_points(bound_out_ori, 0.05)
+    bound_out = bound_out_ori[bound_out_sort_idx]
+    bound_out_id = bound_out_id_ori[bound_out_sort_idx]
+    for i in range(len(bound_out_id) - 1):
+        bound_face_id = np.intersect1d(
+            np.where(mesh_out.faces == bound_out_id[i])[0],
+            np.where(mesh_out.faces == bound_out_id[i + 1])[0],
+        )
+        if len(bound_face_id):
+            bound_face = mesh_out.faces[bound_face_id[0]]
+            b_p_0 = np.where(bound_face == bound_out_id[i])[0]
+            b_p_1 = np.where(bound_face == bound_out_id[i + 1])[0]
+            if (
+                (b_p_0, b_p_1) == (0, 1)
+                or (b_p_0, b_p_1) == (1, 2)
+                or (b_p_0, b_p_1) == (2, 0)
+            ):
+                bound_out = bound_out[::-1]
+                bound_out_id = bound_out_id[::-1]
+            break
+
+    p, dis, triangles = trimesh.base.proximity.closest_point(mesh_inner, bound_out)
+
+    array = (bound_out - p) / 4
+    p = p[::-1]
+    for n in range(3, 0, -1):
+        p_ = bound_out - array * n
+        p_ = p_[::-1]
+        p = np.concatenate((p, p_), axis=0)
+    p = p[::-1]
+    edge_inner_idx = []
+    edge_outer_idx = []
+    new_faces = []
+    new_bound_out_id = np.arange(len(bound_out_id))
+    for i in range(len(bound_out_id)):
+        p0_id = len(bound_out_id) + i
+        p1_id = len(bound_out_id) + (i + 1 if i + 1 < len(bound_out_id) else 0)
+        b0_id = new_bound_out_id[i]
+        b1_id = new_bound_out_id[i + 1 if i + 1 < len(bound_out_id) else 0]
+        new_faces.append([b0_id, b1_id, p1_id])
+        new_faces.append([p0_id, b0_id, p1_id])
+        edge_outer_idx.append([b0_id, b1_id])
+        for j in range(3):
+            new_faces.append(
+                [
+                    p0_id + j * len(bound_out),
+                    p1_id + j * len(bound_out),
+                    p1_id + (j + 1) * len(bound_out),
+                ]
+            )
+            new_faces.append(
+                [
+                    p0_id + (j + 1) * len(bound_out),
+                    p0_id + j * len(bound_out),
+                    p1_id + (j + 1) * len(bound_out),
+                ]
+            )
+            if j == 2:
+                edge_inner_idx.append(
+                    [
+                        p0_id + (j + 1) * len(bound_out),
+                        p1_id + (j + 1) * len(bound_out),
+                    ]
+                )
+
+    edge_inner_idx = np.array(edge_inner_idx)
+    edge_outer_idx = np.array(edge_outer_idx)
+
+    model_bound = trimesh.Trimesh(
+        np.concatenate((mesh_out.vertices[bound_out_id], p), axis=0),
+        np.array(new_faces),
+        process=False,
+    )
+
+    bound_points_idx = np.arange(len(model_bound.vertices))
+    # bound_inner_idx = np.unique(edge_inner_idx)
+    bound_outer_idx = np.unique(edge_outer_idx)
+    bound_inner_idx = np.setdiff1d(bound_points_idx, bound_outer_idx)
+
+    distance_bound_inner = np.linalg.norm(
+        model_bound.vertices[np.unique(edge_inner_idx)][:, np.newaxis, :]
+        - mesh_inner.vertices,
+        axis=2,
+    )
+    remove_points_idx = np.unique(np.where(distance_bound_inner < 0.1)[1])
+    mesh_inner_o3d = mesh_inner.as_open3d
+    mesh_inner_o3d.remove_vertices_by_index(remove_points_idx)
+
+    unique_elements, counts = np.unique(
+        np.asarray(mesh_inner_o3d.triangles), return_counts=True
+    )
+    mesh_inner_o3d.remove_vertices_by_index(unique_elements[np.where(counts == 1)[0]])
+    mesh_inner_o3d.remove_duplicated_vertices()
+    mesh_inner_o3d.remove_unreferenced_vertices()
+    mesh_inner_o3d = boundarySmooth(mesh_inner_o3d).as_open3d
+    model_bound_inner, bounds_inner_self_idx = stitch_(
+        mesh_inner_o3d, model_bound, edge_inner_idx
+    )
+    inner_points_idx = np.arange(
+        len(model_bound.vertices), len(model_bound_inner.vertices)
+    )
+
+    neighbor = get_neighbors(bound_out_id, 3, mesh_out)
+    neighbor = np.unique([t for x in neighbor for t in x])
+    distance = np.linalg.norm(
+        model_bound.vertices[np.unique(edge_outer_idx)][:, np.newaxis, :]
+        - mesh_out.vertices[neighbor],
+        axis=2,
+    )
+    remove_points_idx = np.unique(np.where(distance < 0.1)[1])
+    mesh_outer_o3d = mesh_out.as_open3d
+    mesh_outer_o3d.remove_vertices_by_index(np.array(neighbor)[remove_points_idx])
+
+    unique_elements, counts = np.unique(
+        np.asarray(mesh_outer_o3d.triangles), return_counts=True
+    )
+    mesh_outer_o3d.remove_vertices_by_index(unique_elements[np.where(counts == 1)[0]])
+    mesh_outer_o3d = get_biggest_mesh(mesh_outer_o3d).as_open3d
+    mesh_outer_o3d.remove_duplicated_vertices()
+    mesh_outer_o3d.remove_unreferenced_vertices()
+    mesh_outer_o3d.remove_degenerate_triangles()
+    mesh_outer_o3d = boundarySmooth(mesh_outer_o3d).as_open3d
+
+    model_bound_outer, bounds_outer_self_idx = stitch_(
+        mesh_outer_o3d, model_bound_inner, edge_outer_idx, type="outer"
+    )
+    outer_points_idx = np.arange(
+        len(model_bound_inner.vertices), len(model_bound_outer.vertices)
+    )
+
+    v = np.array(model_bound_outer.vertices)
+
+    smoothed_points_idx = np.concatenate(
+        [bound_points_idx, bounds_inner_self_idx, bounds_outer_self_idx]
+    )
+    faces = model_bound_outer.faces
+    f_mask = np.all(np.isin(faces, smoothed_points_idx), axis=1)
+    b = np.zeros(np.max(smoothed_points_idx) + 1, dtype=np.int32)
+    a = np.vstack([smoothed_points_idx, np.arange(len(smoothed_points_idx))])
+    b[a[0]] = a[1]
+
+    mesh_bound_outer_removed = trimesh.Trimesh(
+        model_bound_outer.vertices[smoothed_points_idx],
+        b[faces[f_mask]],
+        process=False,
+    )
+    model_laplacian = trimesh.smoothing.filter_taubin(
+        mesh_bound_outer_removed,
+    )
+    v[smoothed_points_idx[: len(bound_points_idx)]] = model_laplacian.vertices[
+        : len(bound_points_idx)
+    ]
+    model_laplacian_edge = trimesh.Trimesh(
+        vertices=v,
+        faces=model_bound_outer.faces,
+        process=False,
+    )
+    model_laplacian_edge.fix_normals()
+    return (
+        model_laplacian_edge,
+        outer_points_idx,
+        inner_points_idx,
+        bound_outer_idx,
+        bound_inner_idx,
+    )
+
+
+def dilate_points(mesh, key_name):
+    new_points = get_neighbors(getattr(mesh, key_name).idx, 4, mesh)
+    new_points = np.unique([t for x in new_points for t in x])
+    mesh.add_keypoint(key_name, new_points)
+    return mesh
+
+
 seed = 2023
 random.seed(seed)
 np.random.seed(seed)
@@ -984,6 +1557,13 @@ class GenerateCrowns:
         self.AOI_or_UB = 1
         self.undercut_filled = 0
         self.multi_restoration = False
+        self.preop_or_mirror = ""
+        self.std_crown = None
+        self.pre_op_crown = None
+        self.pre_op_teeth = None
+        self.mirror_id = None
+        self.fill_undercut = False
+        self.preop_matrix = np.eye(4)
 
     def load_data(self, **kwargs):
         for key, value in kwargs.items():
@@ -1031,7 +1611,7 @@ class GenerateCrowns:
         self.mesh1_id, self.mesh2_id = find_closest_values(
             self.all_other_crowns, self.miss_id
         )
-        if self.miss_id in ["17", "27", "37", "47"]:
+        if self.miss_id in ["17", "27", "37", "47"] and self.is_single != 3:
             self.is_single = 2
         if int(self.miss_id) < 30:
             self.up_low = 0
@@ -1107,14 +1687,7 @@ class GenerateCrowns:
             self.trans_matrix = np.array(self.trans_matrix).reshape((4, 4))
         if self.points_info is not None and self.morph_template == self.template_name:
             p_id = {}
-            # str2color = {}
-            # color_list = [
-            #     x for x in [x for y in list(self.cpu_colors_info.values()) for x in y]
-            # ]
-            # for color in color_list:
-            #     str2color["".join(map(str, color))] = color
             for color_str in self.points_info.keys():
-                # color = str2color[color_str]
                 color = [int(x) for x in color_str.split("-")]
                 p_id[
                     bin(color[0])[2:].zfill(8)
@@ -1162,6 +1735,11 @@ class GenerateCrowns:
                         and v
                     ):
                         self.mesh.add_keypoint(k, pt=np.array(v), mode=1)
+
+        if self.points_config is not None:
+            for key, value in self.points_config.items():
+                if value is not None:
+                    self.mesh.add_keypoint(key, pt=np.array(value), mode=1)
         if self.axis:
             axis_ply = trimesh.PointCloud(self.axis)
             axis_ply.apply_transform(self.trans_matrix)
@@ -1180,7 +1758,12 @@ class GenerateCrowns:
             dac = DAC(
                 self.all_other_crowns, self.kps, int(self.miss_id), self.is_single
             )
-            curve, control_points, sampled_points, T, A = dac.get_dac_nurbs()
+            try:
+                curve, control_points, sampled_points, T, A = dac.get_dac_nurbs()
+            except Exception as e:
+                print(f"Error in DAC computation: {e}")
+                self.dac_point = None
+                return
             if self.is_single == 1:
                 crown_id_1 = self.mesh1_id
                 crown_id_2 = self.mesh2_id
@@ -1222,15 +1805,15 @@ class GenerateCrowns:
             if self.dac_point:
                 trans_h = self.dac_point[0][1] - self.mesh1.centroid[1]
                 self.mesh1.apply_translation([0, trans_h, 0])
-            if self.pt2 and self.use_pt2:
-                self.pt2 = trimesh.PointCloud(self.pt2)
-                self.pt1 = self.pt2.copy()
-                self.pt1.apply_translation(-(self.mesh2.centroid - centroid) * 2)
-                if self.dac_point:
-                    self.pt1.apply_translation([0, trans_h, 0])
-            else:
-                self.pt1 = None
-                self.pt2 = None
+            # if self.pt2 and self.use_pt2:
+            #     self.pt2 = trimesh.PointCloud(self.pt2)
+            #     self.pt1 = self.pt2.copy()
+            #     self.pt1.apply_translation(-(self.mesh2.centroid - centroid) * 2)
+            #     if self.dac_point:
+            #         self.pt1.apply_translation([0, trans_h, 0])
+            # else:
+            #     self.pt1 = None
+            #     self.pt2 = None
         elif self.is_single == 2:
             self.mesh1 = read_mesh_bytes(self.mesh1)
             self.mesh2 = self.mesh1.copy()
@@ -1238,32 +1821,32 @@ class GenerateCrowns:
             if self.dac_point:
                 trans_h = self.dac_point[0][1] - self.mesh2.centroid[1]
                 self.mesh2.apply_translation([0, trans_h, 0])
-            if self.pt1 and self.use_pt1:
-                self.pt1 = trimesh.PointCloud(self.pt1)
-                self.pt2 = self.pt1.copy()
-                self.pt2.apply_translation(-(self.mesh1.centroid - centroid) * 2)
-                if self.dac_point:
-                    self.pt2.apply_translation([0, trans_h, 0])
-            else:
-                self.pt1 = None
-                self.pt2 = None
-        else:
+            # if self.pt1 and self.use_pt1:
+            #     self.pt1 = trimesh.PointCloud(self.pt1)
+            #     self.pt2 = self.pt1.copy()
+            #     self.pt2.apply_translation(-(self.mesh1.centroid - centroid) * 2)
+            #     if self.dac_point:
+            #         self.pt2.apply_translation([0, trans_h, 0])
+            # else:
+            #     self.pt1 = None
+            #     self.pt2 = None
+        elif self.is_single == 0:
             self.mesh1 = read_mesh_bytes(self.mesh1)
             self.mesh2 = read_mesh_bytes(self.mesh2)
-            if self.pt1 and self.use_pt1:
-                self.pt1 = trimesh.PointCloud(self.pt1)
-                if self.pt2 and self.use_pt2:
-                    self.pt2 = trimesh.PointCloud(self.pt2)
-                else:
-                    self.pt2 = self.pt1.copy()
-                    self.pt2.apply_translation(-(self.mesh1.centroid - centroid) * 2)
-            elif self.pt2 and self.use_pt2:
-                self.pt2 = trimesh.PointCloud(self.pt2)
-                self.pt1 = self.pt2.copy()
-                self.pt1.apply_translation(-(self.mesh2.centroid - centroid) * 2)
-            else:
-                self.pt1 = None
-                self.pt2 = None
+            # if self.pt1 and self.use_pt1:
+            #     self.pt1 = trimesh.PointCloud(self.pt1)
+            #     if self.pt2 and self.use_pt2:
+            #         self.pt2 = trimesh.PointCloud(self.pt2)
+            #     else:
+            #         self.pt2 = self.pt1.copy()
+            #         self.pt2.apply_translation(-(self.mesh1.centroid - centroid) * 2)
+            # elif self.pt2 and self.use_pt2:
+            #     self.pt2 = trimesh.PointCloud(self.pt2)
+            #     self.pt1 = self.pt2.copy()
+            #     self.pt1.apply_translation(-(self.mesh2.centroid - centroid) * 2)
+            # else:
+            #     self.pt1 = None
+            #     self.pt2 = None
 
     def get_crown(self):
         self.voxel_logits = np.array(self.voxel_logits)
@@ -1324,58 +1907,63 @@ class GenerateCrowns:
             self.matrix[:3, 3] = self.mesh.centroid * -1
         self.mesh.apply_transform(self.rotation_matrix @ self.matrix)
         self.mesh_beiya.apply_transform(self.rotation_matrix @ self.matrix)
-        self.mesh1.apply_transform(self.rotation_matrix @ self.matrix)
-        self.mesh2.apply_transform(self.rotation_matrix @ self.matrix)
+        if self.mesh1:
+            self.mesh1.apply_transform(self.rotation_matrix @ self.matrix)
+        if self.mesh2:
+            self.mesh2.apply_transform(self.rotation_matrix @ self.matrix)
         if self.mesh_upper:
             self.mesh_upper.apply_transform(self.rotation_matrix @ self.matrix)
         if self.mesh_lower:
             self.mesh_lower.apply_transform(self.rotation_matrix @ self.matrix)
-        if self.pt1:
-            self.pt1.apply_transform(self.rotation_matrix @ self.matrix)
-        if self.pt2:
-            self.pt2.apply_transform(self.rotation_matrix @ self.matrix)
-        if self.AB:
-            self.AB.apply_transform(self.rotation_matrix @ self.matrix)
+        # if self.pt1:
+        #     self.pt1.apply_transform(self.rotation_matrix @ self.matrix)
+        # if self.pt2:
+        #     self.pt2.apply_transform(self.rotation_matrix @ self.matrix)
+        # if self.AB:
+        #     self.AB.apply_transform(self.rotation_matrix @ self.matrix)
 
     def get_matrix_from_pt(self):
         if self.new_transform_list:
             self.pt_matrix = np.array(self.new_transform_list[2])
         else:
-            if self.pt1 and self.pt2:
-                y1 = self.pt1.vertices[0] - np.mean(
-                    [self.pt1.vertices[1], self.pt1.vertices[2]], axis=0
-                )
-                y2 = self.pt2.vertices[0] - np.mean(
-                    [self.pt2.vertices[1], self.pt2.vertices[2]], axis=0
-                )
-                if (y1 + y2)[2] < 0:
-                    m = trimesh.base.transformations.quaternion_about_axis(
-                        np.arccos(np.dot(y1 + y2, [0, 1, 0]) / np.linalg.norm(y1 + y2)),
-                        [1, 0, 0],
-                    )
-                else:
-                    m = trimesh.base.transformations.quaternion_about_axis(
-                        -np.arccos(
-                            np.dot(y1 + y2, [0, 1, 0]) / np.linalg.norm(y1 + y2)
-                        ),
-                        [1, 0, 0],
-                    )
-                self.pt_matrix = trimesh.base.transformations.quaternion_matrix(m)
+            # if self.pt1 and self.pt2:
+            #     y1 = self.pt1.vertices[0] - np.mean(
+            #         [self.pt1.vertices[1], self.pt1.vertices[2]], axis=0
+            #     )
+            #     y2 = self.pt2.vertices[0] - np.mean(
+            #         [self.pt2.vertices[1], self.pt2.vertices[2]], axis=0
+            #     )
+            #     if (y1 + y2)[2] < 0:
+            #         m = trimesh.base.transformations.quaternion_about_axis(
+            #             np.arccos(np.dot(y1 + y2, [0, 1, 0]) / np.linalg.norm(y1 + y2)),
+            #             [1, 0, 0],
+            #         )
+            #     else:
+            #         m = trimesh.base.transformations.quaternion_about_axis(
+            #             -np.arccos(
+            #                 np.dot(y1 + y2, [0, 1, 0]) / np.linalg.norm(y1 + y2)
+            #             ),
+            #             [1, 0, 0],
+            #         )
+            #     self.pt_matrix = trimesh.base.transformations.quaternion_matrix(m)
 
-            else:
-                self.pt_matrix = []
+            # else:
+            #     self.pt_matrix = []
+            self.pt_matrix = []
         if len(self.pt_matrix):
             self.mesh_beiya.apply_transform(self.pt_matrix)
-            self.mesh1.apply_transform(self.pt_matrix)
-            self.mesh2.apply_transform(self.pt_matrix)
+            if self.mesh1:
+                self.mesh1.apply_transform(self.pt_matrix)
+            if self.mesh2:
+                self.mesh2.apply_transform(self.pt_matrix)
             if self.mesh_upper:
                 self.mesh_upper.apply_transform(self.pt_matrix)
             if self.mesh_lower:
                 self.mesh_lower.apply_transform(self.pt_matrix)
-            if self.pt1:
-                self.pt1.apply_transform(self.pt_matrix)
-            if self.pt2:
-                self.pt2.apply_transform(self.pt_matrix)
+            # if self.pt1:
+            #     self.pt1.apply_transform(self.pt_matrix)
+            # if self.pt2:
+            #     self.pt2.apply_transform(self.pt_matrix)
 
     def get_matrix_from_ab(self):
         unit_vector = self.AB.vertices[0] - self.AB.vertices[1]
@@ -1409,15 +1997,17 @@ class GenerateCrowns:
             self.mesh_upper.apply_transform(self.ai_matrix)
         if self.mesh_lower:
             self.mesh_lower.apply_transform(self.ai_matrix)
-        self.mesh1.apply_transform(self.ai_matrix)
-        self.mesh2.apply_transform(self.ai_matrix)
+        if self.mesh1:
+            self.mesh1.apply_transform(self.ai_matrix)
+        if self.mesh2:
+            self.mesh2.apply_transform(self.ai_matrix)
 
-        if self.pt1:
-            self.pt1.apply_transform(self.ai_matrix)
-        if self.pt2:
-            self.pt2.apply_transform(self.ai_matrix)
-        if self.AB:
-            self.AB.apply_transform(self.ai_matrix)
+        # if self.pt1:
+        #     self.pt1.apply_transform(self.ai_matrix)
+        # if self.pt2:
+        #     self.pt2.apply_transform(self.ai_matrix)
+        # if self.AB:
+        #     self.AB.apply_transform(self.ai_matrix)
 
         self.mesh.update_mesh()
 
@@ -1439,15 +2029,26 @@ class GenerateCrowns:
 
     def get_roi_from_upper_lower(self):
         if self.up_low:
+            self.post_op_teeth = self.mesh_lower.copy()
             self.mesh_jaw = self.mesh_lower.copy()
             if self.mesh_upper:
                 self.mesh_oppo = self.mesh_upper.copy()
         else:
+            self.post_op_teeth = self.mesh_upper.copy()
             self.mesh_jaw = self.mesh_upper.copy()
             if self.mesh_lower:
                 self.mesh_oppo = self.mesh_lower.copy()
         self.mesh_jaw = get_roi(self.mesh_jaw, self.mesh_beiya.centroid, 10)
-        self.mesh_jaw = self.mesh_jaw.simplify_quadric_decimation(25000)
+        mesh_jaw = self.mesh_jaw.as_open3d
+        mesh_jaw.compute_vertex_normals()
+        mesh_jaw.remove_duplicated_vertices()
+        mesh_jaw.remove_duplicated_triangles()
+        mesh_jaw.remove_degenerate_triangles()
+        mesh_jaw.remove_unreferenced_vertices()
+        self.mesh_jaw = trimesh.Trimesh(mesh_jaw.vertices, mesh_jaw.triangles)
+        if len(self.mesh_jaw.faces) > 25000:
+            self.mesh_jaw = self.mesh_jaw.simplify_quadric_decimation(25000)
+            self.mesh_jaw = trimesh.smoothing.filter_taubin(self.mesh_jaw)
         if self.mesh_oppo:
             self.mesh_oppo = get_roi(self.mesh_oppo, self.mesh_beiya.centroid, 20)
         self.mesh_jaw = get_biggest_mesh(self.mesh_jaw)
@@ -1551,30 +2152,30 @@ class GenerateCrowns:
                     if len(self.pt_matrix):
                         self.mesh1.apply_transform(self.pt_matrix)
                     self.mesh1.apply_transform(self.ai_matrix)
-                    if (
-                        self.mesh1_id
-                        in list(list(self.kps.values())[0].values())[0].keys()
-                    ):
-                        self.pt1 = trimesh.PointCloud(
-                            list(
-                                list(list(self.kps.values())[0].values())[0][
-                                    self.mesh1_id
-                                ].values()
-                            )
-                        )
-                        self.pt1.apply_transform(self.rotation_matrix @ self.matrix)
-                        if len(self.pt_matrix):
-                            self.pt1.apply_transform(self.pt_matrix)
-                        self.pt1.apply_transform(self.ai_matrix)
-                        if self.mesh1_id[1] == "3":
-                            self.use_pt1 = False
-                        else:
-                            self.use_pt1 = self.check_kps(
-                                self.pt1.vertices.tolist(), self.mesh1_id
-                            )
-                    else:
-                        self.use_pt1 = False
-                        self.pt1 = None
+                    # if (
+                    #     self.mesh1_id
+                    #     in list(list(self.kps.values())[0].values())[0].keys()
+                    # ):
+                    # self.pt1 = trimesh.PointCloud(
+                    #     list(
+                    #         list(list(self.kps.values())[0].values())[0][
+                    #             self.mesh1_id
+                    #         ].values()
+                    #     )
+                    # )
+                    # self.pt1.apply_transform(self.rotation_matrix @ self.matrix)
+                    # if len(self.pt_matrix):
+                    #     self.pt1.apply_transform(self.pt_matrix)
+                    # self.pt1.apply_transform(self.ai_matrix)
+                    # if self.mesh1_id[1] == "3":
+                    #     self.use_pt1 = False
+                    # else:
+                    #     self.use_pt1 = self.check_kps(
+                    #         self.pt1.vertices.tolist(), self.mesh1_id
+                    #     )
+                    # else:
+                    #     self.use_pt1 = False
+                    #     self.pt1 = None
         elif self.is_single == 2:
             self.mesh2_id = str(int(self.miss_id) + 2)
             if self.mesh2_id in self.all_other_crowns.keys():
@@ -1586,94 +2187,97 @@ class GenerateCrowns:
                     if len(self.pt_matrix):
                         self.mesh2.apply_transform(self.pt_matrix)
                     self.mesh2.apply_transform(self.ai_matrix)
-                    if (
-                        self.mesh2_id
-                        in list(list(self.kps.values())[0].values())[0].keys()
-                    ):
-                        self.pt2 = trimesh.PointCloud(
-                            list(
-                                list(list(self.kps.values())[0].values())[0][
-                                    self.mesh2_id
-                                ].values()
-                            )
-                        )
-                        self.pt2.apply_transform(self.rotation_matrix @ self.matrix)
-                        if len(self.pt_matrix):
-                            self.pt2.apply_transform(self.pt_matrix)
-                        self.pt2.apply_transform(self.ai_matrix)
-                        self.use_pt2 = self.check_kps(
-                            self.pt2.vertices.tolist(), self.mesh2_id
-                        )
-                    else:
-                        self.use_pt2 = False
-                        self.pt2 = None
+                    # if (
+                    #     self.mesh2_id
+                    #     in list(list(self.kps.values())[0].values())[0].keys()
+                    # ):
+                    #     self.pt2 = trimesh.PointCloud(
+                    #         list(
+                    #             list(list(self.kps.values())[0].values())[0][
+                    #                 self.mesh2_id
+                    #             ].values()
+                    #         )
+                    #     )
+                    #     self.pt2.apply_transform(self.rotation_matrix @ self.matrix)
+                    #     if len(self.pt_matrix):
+                    #         self.pt2.apply_transform(self.pt_matrix)
+                    #     self.pt2.apply_transform(self.ai_matrix)
+                    #     self.use_pt2 = self.check_kps(
+                    #         self.pt2.vertices.tolist(), self.mesh2_id
+                    #     )
+                    # else:
+                    #     self.use_pt2 = False
+                    #     self.pt2 = None
 
-        path_x1 = trimesh.intersections.mesh_plane(
-            self.mesh1, [0, 0, 1], [0, 0, 0]
-        ).reshape(-1, 3)[:, 0]
-        path_x2 = trimesh.intersections.mesh_plane(
-            self.mesh2, [0, 0, 1], [0, 0, 0]
-        ).reshape(-1, 3)[:, 0]
-        path_x = trimesh.intersections.mesh_plane(
-            self.mesh, [0, 0, 1], [0, 0, 0]
-        ).reshape(-1, 3)[:, 0]
+        # path_x1 = trimesh.intersections.mesh_plane(
+        #     self.mesh1, [0, 0, 1], [0, 0, 0]
+        # ).reshape(-1, 3)[:, 0]
+        # path_x2 = trimesh.intersections.mesh_plane(
+        #     self.mesh2, [0, 0, 1], [0, 0, 0]
+        # ).reshape(-1, 3)[:, 0]
+        # path_x = trimesh.intersections.mesh_plane(
+        #     self.mesh, [0, 0, 1], [0, 0, 0]
+        # ).reshape(-1, 3)[:, 0]
 
-        if self.is_single == 1:
-            max_x = np.max(self.neck_points[:, 0])
-            min_x = np.max(path_x2)
-        elif self.is_single == 2:
-            max_x = np.min(path_x1)
-            min_x = np.min(self.neck_points[:, 0])
-        elif self.is_single == 0:
-            max_x = np.min(path_x1)
-            min_x = np.max(path_x2)
-        dis_x = np.max(path_x) - np.min(path_x)
-        dis_z_1 = np.diff(self.mesh1.bounds, axis=0)[0, 2]
-        dis_z_2 = np.diff(self.mesh2.bounds, axis=0)[0, 2]
-        dis_z = np.diff(self.mesh.bounds, axis=0)[0, 2]
-        if self.is_single == 1:
-            z_length_2 = self.z_length[self.mesh2_id]
-            z_length_1 = z_length_2
-        elif self.is_single == 2:
-            z_length_1 = self.z_length[self.mesh1_id]
-            z_length_2 = z_length_1
-        elif self.is_single == 0:
-            z_length_1 = self.z_length[self.mesh1_id]
-            z_length_2 = self.z_length[self.mesh2_id]
-        z_length = self.z_length[self.miss_id]
+        # if self.is_single == 1:
+        #     max_x = np.max(self.neck_points[:, 0])
+        #     min_x = np.max(path_x2)
+        # elif self.is_single == 2:
+        #     max_x = np.min(path_x1)
+        #     min_x = np.min(self.neck_points[:, 0])
+        # elif self.is_single == 0:
+        #     max_x = np.min(path_x1)
+        #     min_x = np.max(path_x2)
+        # dis_x = np.max(path_x) - np.min(path_x)
+        # dis_z_1 = np.diff(self.mesh1.bounds, axis=0)[0, 2]
+        # dis_z_2 = np.diff(self.mesh2.bounds, axis=0)[0, 2]
+        # dis_z = np.diff(self.mesh.bounds, axis=0)[0, 2]
+        # if self.is_single == 1:
+        #     z_length_2 = self.z_length[self.mesh2_id]
+        #     z_length_1 = z_length_2
+        # elif self.is_single == 2:
+        #     z_length_1 = self.z_length[self.mesh1_id]
+        #     z_length_2 = z_length_1
+        # elif self.is_single == 0:
+        #     z_length_1 = self.z_length[self.mesh1_id]
+        #     z_length_2 = self.z_length[self.mesh2_id]
+        # z_length = self.z_length[self.miss_id]
 
-        scale_x = (max_x - min_x) / dis_x
-        scale_z = (
-            (dis_z_1 / z_length_1 * z_length + dis_z_2 / z_length_2 * z_length)
-            / 2
-            / dis_z
-        )
-        self.mesh.apply_scale([scale_x, 1, scale_z])
-        self.mesh.update_mesh(self.mesh.vertices)
+        # scale_x = (max_x - min_x) / dis_x
+        # scale_z = (
+        #     (dis_z_1 / z_length_1 * z_length + dis_z_2 / z_length_2 * z_length)
+        #     / 2
+        #     / dis_z
+        # )
+        # self.mesh.apply_scale([scale_x, 1, scale_z])
+        # self.mesh.update_mesh(self.mesh.vertices)
 
     def check_kps(self, kps, t_id):
-        with open(
-            os.path.join(self.cwd, "config", "points", "{}.json".format(t_id)), "r"
-        ) as f:
-            info = eval(f.read())
-        info = [list(i.values()) for i in info]
-        kps_list = kps
-        kps = [kps_list[0]] + kps_list[3:-4]
+        if len(kps):
+            with open(
+                os.path.join(self.cwd, "config", "points", "{}.json".format(t_id)), "r"
+            ) as f:
+                info = eval(f.read())
+            info = [list(i.values()) for i in info]
+            kps_list = kps
+            kps = [kps_list[0]] + kps_list[3:-4]
 
-        cost_min = 0
-        # 遍历50个正常案例,找到与测试案例误差最小的值
-        for i in info:
-            (
-                matrix,
-                transformed,
-                cost,
-            ) = trimesh.base.registration.procrustes(kps, i, reflection=False)
-            if cost > cost_min:
-                cost_min = cost
-        if cost_min > 1:
-            return False
+            cost_min = 0
+            # 遍历50个正常案例,找到与测试案例误差最小的值
+            for i in info:
+                (
+                    matrix,
+                    transformed,
+                    cost,
+                ) = trimesh.base.registration.procrustes(kps, i, reflection=False)
+                if cost > cost_min:
+                    cost_min = cost
+            if cost_min > 1:
+                return False
+            else:
+                return True
         else:
-            return True
+            return False
 
     def trans_p(self):
         """
@@ -1891,6 +2495,9 @@ class GenerateCrowns:
         poisson_mesh = trimesh.Trimesh(
             np.asarray(poisson_mesh.vertices), np.asarray(poisson_mesh.triangles)
         )
+        if self.test:
+            poisson_mesh.export(f"{self.save_path}/poisson_mesh.ply")
+            self.mesh_beiya.export(f"{self.save_path}/beiya.ply")
 
         mesh_o3d = self.mesh.as_open3d
         distances_source, _ = compute_signed_distance(poisson_mesh, self.mesh.vertices)
@@ -2877,8 +3484,7 @@ class GenerateCrowns:
     def trans_pre_thickness(self):
         outer_verts = self.mesh.vertices
         outer_faces = self.mesh.faces
-        inner_verts = self.mesh_beiya.vertices
-        inner_faces = self.mesh_beiya.faces
+
         if "linya_points" in vars(self.mesh):
             if self.prox_or_occlu not in [0, 2]:
                 linya_points_ply = trimesh.PointCloud(self.mesh.linya_points.pt)
@@ -2905,7 +3511,13 @@ class GenerateCrowns:
                 pin_points = np.array([])
         import py_minimum_thickness
 
-        self.thickness_face_id = py_minimum_thickness.findThinkness(
+        if self.handler_name in ["post", "stitch"]:
+            self.thickness_shell = get_thickness_gap(self.mesh_beiya)
+            if self.test:
+                self.thickness_shell.export(f"{self.save_path}/thickness_inner.stl")
+        inner_verts = self.thickness_shell.vertices
+        inner_faces = self.thickness_shell.faces
+        self.thickness_face_id = py_minimum_thickness.findThickness(
             outer_verts,
             outer_faces,
             inner_verts,
@@ -2914,7 +3526,7 @@ class GenerateCrowns:
         )
 
         if len(self.thickness_face_id):
-            new_points = py_minimum_thickness.crownAdaptive(
+            new_points, new_faces = py_minimum_thickness.crownAdaptive(
                 self.minimal_thickness,
                 outer_verts,
                 outer_faces,
@@ -2923,7 +3535,8 @@ class GenerateCrowns:
                 pin_points,
             )
             if self.handler_name == "post":
-                self.mesh.update_mesh(new_points)
+                # self.mesh.update_mesh(new_points)
+                self.mesh.update_mesh(new_points, new_faces)
             elif self.handler_name == "occlu":
                 self.mesh_adapt_thickness = TrackedTrimesh(new_points, outer_faces)
                 for v in vars(self.mesh):
@@ -3005,7 +3618,7 @@ class GenerateCrowns:
             f"subdivide_mesh end. p_num:{len(mesh.vertices)}, f_num:{len(mesh.faces)}"
         )
         # desired_count = len(mesh.vertices) // 2
-        desired_count = 12500
+        desired_count = 15000
         decimationType = pylfda.DecimationType.Vertex
         max_normal_deviation = 1
         fix_boundary = False
@@ -3017,8 +3630,11 @@ class GenerateCrowns:
         print(
             f"decimate_mesh end. p_num:{len(self.mesh.vertices)}, f_num:{len(self.mesh.faces)}"
         )
-        mesh = self.mesh.subdivide_loop(1)
+        mesh = trimesh.smoothing.filter_taubin(self.mesh)
+        # mesh = mesh.subdivide_loop(1)
+        mesh = mesh.subdivide()
         self.mesh.update_mesh(mesh.vertices, mesh.faces)
+        # self.mesh.update_mesh(mesh.vertices)
         print(
             f"subdivide_loop end. p_num:{len(self.mesh.vertices)}, f_num:{len(self.mesh.faces)}"
         )
@@ -3038,7 +3654,10 @@ class GenerateCrowns:
             f"remove_vertices_by_index end. p_num:{len(self.mesh.vertices)}, f_num:{len(self.mesh.faces)}"
         )
         self.mesh_outside = trimesh.Trimesh(self.mesh.vertices, self.mesh.faces)
-        mesh_inner = merge_close_vertices(mesh_inner, 0.01)
+        # mesh_inner = merge_close_vertices(mesh_inner, 0.01)
+
+        mesh_inner = mesh_inner.as_open3d.merge_close_vertices(0.01)
+        mesh_inner = trimesh.Trimesh(mesh_inner.vertices, mesh_inner.triangles)
 
         # 备牙修复
         mesh_inner = mesh_inner.as_open3d
@@ -3046,13 +3665,16 @@ class GenerateCrowns:
         mesh_inner.remove_non_manifold_edges()
         mesh_inner = trimesh.Trimesh(mesh_inner.vertices, mesh_inner.triangles)
 
-        # 备牙补洞
-        beiya_lfda = pylfda.Mesh()
-        beiya_lfda.vertices = mesh_inner.vertices
-        beiya_lfda.faces = mesh_inner.faces
-        maximum_filling_hole_size = 2
-        pylfda.fill_hole(beiya_lfda, maximum_filling_hole_size)
-        mesh_inner = trimesh.Trimesh(beiya_lfda.vertices, beiya_lfda.faces)
+        try:
+            # 备牙补洞
+            beiya_lfda = pylfda.Mesh()
+            beiya_lfda.vertices = mesh_inner.vertices
+            beiya_lfda.faces = mesh_inner.faces
+            maximum_filling_hole_size = 2
+            pylfda.fill_hole(beiya_lfda, maximum_filling_hole_size)
+            mesh_inner = trimesh.Trimesh(beiya_lfda.vertices, beiya_lfda.faces)
+        except:
+            print("fill_hole fail")
 
         mesh_inner = mesh_inner.as_open3d
 
@@ -3071,6 +3693,7 @@ class GenerateCrowns:
         mesh_o3d = self.mesh.as_open3d
         v_num = len(np.asarray(mesh_o3d.vertices))
         mesh_o3d = mesh_o3d.merge_close_vertices(0.01)
+        mesh_o3d.remove_non_manifold_edges()
         # while len(np.asarray(mesh_o3d.vertices)) != v_num:
         #     v_num = len(np.asarray(mesh_o3d.vertices))
         #     mesh_o3d = mesh_o3d.merge_close_vertices(0.01)
@@ -3106,50 +3729,69 @@ class GenerateCrowns:
         mesh_inner = boundarySmooth(mesh_inner)
         if self.test:
             mesh_inner.export(f"{self.save_path}/mesh_inner.stl")
-        mesh0 = pylfda.Mesh()
-        mesh1 = pylfda.Mesh()
+            self.mesh.export(f"{self.save_path}/repaired.stl")
+        # mesh0 = pylfda.Mesh()
+        # mesh1 = pylfda.Mesh()
 
-        mesh0.vertices, mesh0.faces = self.mesh.vertices, self.mesh.faces
-        mesh1.vertices, mesh1.faces = mesh_inner.vertices, mesh_inner.faces
+        # mesh0.vertices, mesh0.faces = self.mesh.vertices, self.mesh.faces
+        # mesh1.vertices, mesh1.faces = mesh_inner.vertices, mesh_inner.faces
 
-        mesh_out = pylfda.Mesh()
-        max_stitching_distance = 1
-        self.stitch_success = pylfda.stitch(
-            mesh1, mesh0, mesh_out, max_stitching_distance
-        )
+        # mesh_out = pylfda.Mesh()
+        # max_stitching_distance = 1
+        # self.stitch_success = pylfda.stitch(
+        #     mesh1, mesh0, mesh_out, max_stitching_distance
+        # )
+
+        (
+            mesh_out,
+            self.points_outer_id,
+            self.points_inner_id,
+            self.points_edge_outer_id,
+            self.points_edge_inner_id,
+        ) = stitch_edge_new(self.mesh, mesh_inner)
+
+        print("stitch end")
 
         if self.test:
             self.mesh.export(f"{self.save_path}/mesh_out.stl")
-
+            mesh_out.export(f"{self.save_path}/mesh_out_after.stl")
         if self.handler_name in ["post", "stitch"]:
-            points_edge_inner, _ = getBoundaryPoints(mesh_inner)
-            points_edge_outer, _ = getBoundaryPoints(self.mesh)
-            _, self.points_edge_inner_id = find_new_points(
-                trimesh.Trimesh(mesh_out.vertices, mesh_out.faces), points_edge_inner, 0
-            )
-            _, self.points_edge_outer_id = find_new_points(
-                trimesh.Trimesh(mesh_out.vertices, mesh_out.faces), points_edge_outer, 0
-            )
-            _, self.points_inner_id = find_new_points(
-                trimesh.Trimesh(mesh_out.vertices, mesh_out.faces),
-                mesh_inner.vertices,
-                0,
-            )
-            self.points_outer_id = np.setdiff1d(
-                np.arange(len(mesh_out.vertices)), self.points_inner_id
-            )
-            self.points_inner_id = np.setdiff1d(
-                self.points_inner_id, self.points_edge_inner_id
-            )
-            self.points_outer_id = np.setdiff1d(
-                self.points_outer_id, self.points_edge_outer_id
-            )
-            # self.points_edge_id = np.concatenate(
-            #     [self.points_edge_inner_id, self.points_edge_outer_id], axis=0
+            # mesh_inner_copy = mesh_out.as_open3d.select_by_index(self.points_inner_id)
+            # mesh_inner_copy = trimesh.Trimesh(
+            #     mesh_inner_copy.vertices, mesh_inner_copy.triangles
             # )
+            # mesh_inner_copy.invert()
+            # self.thickness_shell = get_thickness_gap(mesh_inner_copy)
+            boundary = getBoundaryPoints(self.thickness_shell)[1]
+            neighbors = get_neighbors(boundary, 2, self.thickness_shell)
+            neighbors = np.unique([x for y in neighbors for x in y])
+            thickness_shell_o3d = self.thickness_shell.as_open3d
+            thickness_shell_o3d.remove_vertices_by_index(neighbors)
+            self.thickness_shell = trimesh.Trimesh(thickness_shell_o3d.vertices, thickness_shell_o3d.triangles)
+            if self.test:
+                # mesh_inner_copy.export(f"{self.save_path}/mesh_inner_copy.stl")
+                self.thickness_shell.export(f"{self.save_path}/thickness_shell.stl")
+        print("get thickness_shell end")
+
         self.mesh.update_mesh(mesh_out.vertices, mesh_out.faces)
-        if self.handler_name in ["post", "stitch"]:
-            self.thickness_shell = get_thickness_gap(mesh_inner, self.mesh)
+        # self.mesh = dilate_points(self.mesh, "occl_points")
+        # self.mesh = dilate_points(self.mesh, "adj1_points")
+        # self.mesh = dilate_points(self.mesh, "adj2_points")
+        # self.mesh = dilate_points(self.mesh, "fcm_points")
+        # self.mesh = dilate_points(self.mesh, "nfcm_points")
+        # self.mesh = dilate_points(self.mesh, "fcd_points")
+        # self.mesh = dilate_points(self.mesh, "nfcd_points")
+        # self.mesh = dilate_points(self.mesh, "oc_points")
+        # self.mesh.add_keypoint("outer_points", self.points_outer_id)
+        # self.mesh.add_keypoint("inner_points", self.points_inner_id)
+        # self.mesh.add_keypoint(
+        #     "edge_points",
+        #     np.hstack((self.points_edge_outer_id, self.points_edge_inner_id)),
+        # )
+        if len(self.occ_id):
+            new_occ_id = get_neighbors(self.mesh.occ_id.idx, 4, self.mesh)
+            new_occ_id = np.unique([t for x in new_occ_id for t in x])
+            self.mesh.add_keypoint("occ_id", new_occ_id)
         if self.handler_name != "stitch":
             if self.thick_flag:
                 if self.mesh_without_thickness:
@@ -3179,6 +3821,23 @@ class GenerateCrowns:
             self.add_point_normal = self.add_point_normal / np.linalg.norm(
                 self.add_point_normal, axis=1, keepdims=True
             )
+        ms_mesh = pymeshlab.Mesh(self.mesh.vertices, self.mesh.faces)
+        ms = pymeshlab.MeshSet()
+        ms.add_mesh(ms_mesh)
+        ms.compute_selection_by_self_intersections_per_face()
+        if ms_mesh.selected_face_number():
+            self.self_intersecting = True
+        else:
+            self.self_intersecting = False
+
+        # mesh_o3d = self.mesh.as_open3d
+        # mesh_o3d.compute_vertex_normals()
+        # self.self_intersecting = mesh_o3d.is_self_intersecting()
+        print("collision start")
+        c = trimesh.collision.CollisionManager()
+        c.add_object("crown", self.mesh)
+        self.colloision = c.in_collision_single(self.thickness_shell)
+        print("collision end")
 
     def trans_neck2(self):
         neck_points, _ = find_boundaries(self.mesh_beiya)
@@ -3239,6 +3898,35 @@ class GenerateCrowns:
         if self.transform:
             self.mesh.apply_transform(np.linalg.pinv(self.transform))
 
+    def pre_op_and_mirror(self):
+        self.std_crown = read_mesh_bytes(self.std_crown)
+        self.pre_op_crown = read_mesh_bytes(self.pre_op_crown)
+        self.pre_op_teeth = read_mesh_bytes(self.pre_op_teeth)
+        if self.preop_or_mirror == "preop":
+            post_op_crown = pre_op.std_morphing(self.std_crown, self.pre_op_crown)
+            # post_op_crown = pre_op.preop2post(
+            #     self.pre_op_teeth.as_open3d,
+            #     self.post_op_teeth.as_open3d,
+            #     pre_op_morph.as_open3d,
+            # )
+            post_op_crown.apply_transform(self.preop_matrix)
+            # post_op_crown = trimesh.Trimesh(
+            #     post_op_crown.vertices, post_op_crown.triangles
+            # )
+            return post_op_crown
+        elif self.preop_or_mirror == "mirror":
+            m_crown = mirror_crown.mirror_crown(
+                self.all_other_crowns,
+                self.miss_id,
+                self.new_transform_list,
+                self.ai_matrix,
+                self.std_crown,
+                self.mirror_id,
+            )
+            return m_crown
+        else:
+            return self.mesh
+
     def get_std_crown(self):
         self.read_mesh()
         print("read_mesh end")
@@ -3246,11 +3934,19 @@ class GenerateCrowns:
         self.axis_y = self.mesh.cross_points.pt[0] - self.mesh.cross_points.pt[1]
 
         if self.multi_restoration:
-            _, self.new_transform_list = transform_method(
-                self.mesh1,
-                self.mesh2,
+            # _, self.new_transform_list = transform_method(
+            #     self.mesh1,
+            #     self.mesh2,
+            #     self.mesh_beiya,
+            #     len(self.all_other_crowns),
+            #     self.miss_id,
+            #     self.is_single,
+            #     self.pt1,
+            #     self.pt2,
+            # )
+            _, self.new_transform_list = transform_method_(
                 self.mesh_beiya,
-                len(self.all_other_crowns),
+                self.all_other_crowns,
                 self.miss_id,
                 self.is_single,
                 self.pt1,
@@ -3259,29 +3955,37 @@ class GenerateCrowns:
 
         if self.test:
             self.mesh.export(f"{self.save_path}/mesh_0.stl")
-            self.mesh1.export(f"{self.save_path}/mesh1_0.stl")
-            self.mesh2.export(f"{self.save_path}/mesh2_0.stl")
+            if self.mesh1:
+                self.mesh1.export(f"{self.save_path}/mesh1_0.stl")
+            if self.mesh2:
+                self.mesh2.export(f"{self.save_path}/mesh2_0.stl")
             self.mesh_upper.export(f"{self.save_path}/upper_0.stl")
             self.mesh_lower.export(f"{self.save_path}/lower_0.stl")
         self.get_matrix_from_mesh()
         if self.test:
             self.mesh.export(f"{self.save_path}/mesh_1.stl")
-            self.mesh1.export(f"{self.save_path}/mesh1_1.stl")
-            self.mesh2.export(f"{self.save_path}/mesh2_1.stl")
+            if self.mesh1:
+                self.mesh1.export(f"{self.save_path}/mesh1_1.stl")
+            if self.mesh2:
+                self.mesh2.export(f"{self.save_path}/mesh2_1.stl")
             self.mesh_upper.export(f"{self.save_path}/upper_1.stl")
             self.mesh_lower.export(f"{self.save_path}/lower_1.stl")
         self.get_matrix_from_pt()
         if self.test:
             self.mesh.export(f"{self.save_path}/mesh_2.stl")
-            self.mesh1.export(f"{self.save_path}/mesh1_2.stl")
-            self.mesh2.export(f"{self.save_path}/mesh2_2.stl")
+            if self.mesh1:
+                self.mesh1.export(f"{self.save_path}/mesh1_2.stl")
+            if self.mesh2:
+                self.mesh2.export(f"{self.save_path}/mesh2_2.stl")
             self.mesh_upper.export(f"{self.save_path}/upper_2.stl")
             self.mesh_lower.export(f"{self.save_path}/lower_2.stl")
         self.get_matrix_from_ai()
         if self.test:
             self.mesh.export(f"{self.save_path}/mesh_3.stl")
-            self.mesh1.export(f"{self.save_path}/mesh1_3.stl")
-            self.mesh2.export(f"{self.save_path}/mesh2_3.stl")
+            if self.mesh1:
+                self.mesh1.export(f"{self.save_path}/mesh1_3.stl")
+            if self.mesh2:
+                self.mesh2.export(f"{self.save_path}/mesh2_3.stl")
             self.mesh_upper.export(f"{self.save_path}/upper_3.stl")
             self.mesh_lower.export(f"{self.save_path}/lower_3.stl")
         print("transform end")
@@ -3302,17 +4006,24 @@ class GenerateCrowns:
         if self.test:
             self.mesh.export(f"{self.save_path}/mesh_4.stl")
         print("trans_scale end")
-        self.trans_p()
+        # self.trans_p()
+        # if self.test:
+        #     self.mesh.export(f"{self.save_path}/mesh_5.stl")
+        # print("trans_p end")
+        self.mesh = self.pre_op_and_mirror()
         if self.test:
-            self.mesh.export(f"{self.save_path}/mesh_5.stl")
-        print("trans_p end")
+            self.mesh.export(f"{self.save_path}/std.stl")
 
     def get_post_mesh(self):
+        if self.test:
+            os.makedirs(self.save_path, exist_ok=True)
         self.load_paras()
         print(
             f"load_paras end. p_num:{len(self.mesh.vertices)}, f_num:{len(self.mesh.faces)}"
         )
         self.load_points()
+        if self.occ_id is not None:
+            self.mesh.add_keypoint("occ_id", self.occ_id)
         # self.load_config_new()
         # self.axis_y = self.mesh.cross_points.pt[0] - self.mesh.cross_points.pt[1]
         # self.get_adjacent_area()
@@ -3327,6 +4038,13 @@ class GenerateCrowns:
                 )
             # self.neck_points, _ = find_boundaries(self.mesh_beiya)
             # if self.adjust_crown:
+            if self.fill_undercut:
+                self.insert_direction = get_insert_direction(
+                    self.mesh_beiya.as_open3d
+                ).tolist()
+                self.mesh_beiya = filling_undercut(
+                    self.mesh_beiya.as_open3d, self.insert_direction, self.save_path
+                )
             self.dilation()
             print(
                 f"dilation end. p_num:{len(self.mesh.vertices)}, f_num:{len(self.mesh.faces)}"
@@ -3337,8 +4055,10 @@ class GenerateCrowns:
             self.mesh_beiya.export(f"{self.save_path}/beiya.stl")
             self.mesh_upper.export(f"{self.save_path}/upper.stl")
             self.mesh_lower.export(f"{self.save_path}/lower.stl")
-            self.mesh1.export(f"{self.save_path}/mesh1.stl")
-            self.mesh2.export(f"{self.save_path}/mesh2.stl")
+            if self.mesh1:
+                self.mesh1.export(f"{self.save_path}/mesh1.stl")
+            if self.mesh2:
+                self.mesh2.export(f"{self.save_path}/mesh2.stl")
             self.mesh.export(f"{self.save_path}/mesh.stl")
         print(f"adjust_crown is {self.adjust_crown}")
         if self.adjust_crown:
@@ -3482,13 +4202,23 @@ class GenerateCrowns:
 
     def stitch_edge(self):
         self.load_paras()
+        self.mesh = TrackedTrimesh(self.mesh.vertices, self.mesh.faces, process=False)
         print("load_paras end")
-        self.simplify()
+        if len(self.occ_id):
+            self.mesh.add_keypoint("occ_id", self.occ_id)
+        self.simplify(update=True)
 
         if self.align_edges:
             if not self.undercut_filled:
                 self.get_purue_beiya()
             # self.neck_points, _ = find_boundaries(self.mesh_beiya)
+            if self.fill_undercut:
+                self.insert_direction = get_insert_direction(
+                    self.mesh_beiya.as_open3d
+                ).tolist()
+                self.mesh_beiya = filling_undercut(
+                    self.mesh_beiya.as_open3d, self.insert_direction, self.save_path
+                )
             self.dilation()
             print("dilation end")
             self.trans_neck2()
@@ -3726,7 +4456,13 @@ def stdcrown(event):
         transform=event.get("transform"),
         ai_matrix=event.get("ai_matrix"),
         template_name=event.get("template_name", "st_tooth"),
-        multi_restoration = event.get("multi_restoration"),
+        multi_restoration=event.get("multi_restoration"),
+        preop_or_mirror=event.get("preop_or_mirror"),
+        preop_matrix=event.get("self.preop_matrix"),
+        std_crown=event.get("std_crown"),
+        pre_op_crown=event.get("pre_op_crown"),
+        # pre_op_teeth=event.get("pre_op_teeth"),
+        mirror_id=event.get("mirror_id"),
         handler_name="std",
         test=event.get("test", False),
         save_path=event.get("save_path", None),
@@ -3749,8 +4485,10 @@ def post(event):
         cpu_colors_info=event.get("cpu_colors_info"),
         points_oppo_id=event.get("points_oppo_id"),
         paras=event.get("paras"),
-        mesh=read_mesh_bytes(event.get("standard")),
-        # mesh=event.get("standard"),
+        fill_undercut=event.get("fill_undercut", False),
+        # mesh=read_mesh_bytes(event.get("standard")),
+        occ_id=event.get("occ_id"),
+        mesh=event.get("standard"),
         mesh_jaw=read_mesh_bytes(event.get("mesh_jaw")),
         mesh_oppo=read_mesh_bytes(event.get("mesh_oppo")),
         pre_tag=event.get("pre_tag"),
@@ -3758,6 +4496,7 @@ def post(event):
         template_name=event.get("template_name", "st_tooth"),
         undercut_mesh=event.get("undercut_mesh"),
         points_info=event.get("points_info"),
+        points_config=event.get("config"),
         handler_name="post",
         test=event.get("test", False),
         save_path=event.get("save_path", None),
@@ -3805,15 +4544,20 @@ def adjust(event):
 def stitch_edge(event):
     generate_crowns = GenerateCrowns()
     generate_crowns.load_data(
-        mesh=read_mesh_bytes(event.get("out")),
+        # mesh=read_mesh_bytes(event.get("out")),
+        mesh=event.get("out"),
+        occ_id=event.get("occ_id"),
         mesh_beiya=read_mesh_bytes(event.get("inner")),
         add_points=event.get("add_points"),
         miss_id=event.get("beiya_id"),
         axis=event.get("axis"),
         align_edges=event.get("align_edges", True),
         paras=event.get("paras"),
+        fill_undercut=event.get("fill_undercut", False),
         mesh_jaw=read_mesh_bytes(event.get("mesh_jaw")),
         handler_name="stitch",
+        test=event.get("test", False),
+        save_path=event.get("save_path", None),
     )
     generate_crowns.stitch_edge()
 

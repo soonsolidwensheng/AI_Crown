@@ -35,26 +35,79 @@ def write_mesh_bytes(mesh, preserve_order=False):
 
 
 def compress_drc(mesh, points_id=[]):
-    vert_flags = np.zeros(len(mesh.vertices), dtype=np.uint8)
-    for i in range(len(points_id)):
-        vert_flags[points_id[i]] = i + 1
+    if mesh:
+        vert_flags = np.zeros(len(mesh.vertices), dtype=np.uint8)
+        for i in range(len(points_id)):
+            if len(points_id[i]) == 0:
+                continue
+            vert_flags[points_id[i]] = i + 1
+        in_mesh = MQCompressPy.MQC_Mesh()
+        in_mesh.verts = MQCompressPy.VerticeArray(mesh.vertices)
+        in_mesh.faces = MQCompressPy.FaceArray(mesh.faces)
+        in_vert_flags = MQCompressPy.VerticeFlag_UINT8(
+            np.array(vert_flags).astype(np.uint8)
+        )
+        compressed_data, error_code = MQCompressPy.compressMesh_UINT8(
+            in_mesh, in_vert_flags
+        )
+        if error_code == 0:
+            b64_bytes = base64.b64encode(compressed_data)
+            b64_str = b64_bytes.decode("utf-8")
+            return b64_str
+        else:
+            assert "drc compress error"
+    else:
+        return ''
+
+
+def decompress_drc(compressed_data):
+    compressed_data = base64.b64decode(compressed_data)
+    out_mesh = MQCompressPy.MQC_Mesh()
+    out_flags = MQCompressPy.VerticeFlag_UINT8()
+    out_mesh_, out_flags, error_code = MQCompressPy.decompressMesh_UINT8(
+        compressed_data
+    )
+    out_mesh = trimesh.Trimesh()
+    out_mesh.vertices = out_mesh_.verts
+    out_mesh.faces = out_mesh_.faces
+    return out_mesh, out_flags
+
+
+def compress_drc_int16(mesh, config):
+    vert_flags = np.zeros(len(mesh.vertices), dtype=np.int16)
+    vert_flags[config["occl_points"]] += 1
+    vert_flags[config["adj1_points"]] += 2
+    vert_flags[config["adj2_points"]] += 2**2
+    vert_flags[config["fcm_points"]] += 2**3
+    vert_flags[config["nfcm_points"]] += 2**4
+    vert_flags[config["fcd_points"]] += 2**5
+    vert_flags[config["nfcd_points"]] += 2**6
+    vert_flags[config["oc_points"]] += 2**7
+    vert_flags[config["outer_points"]] += 2**8
+    vert_flags[config["inner_points"]] += 2**9
+    vert_flags[config["edge_points"]] += 2**10
     in_mesh = MQCompressPy.MQC_Mesh()
     in_mesh.verts = MQCompressPy.VerticeArray(mesh.vertices)
     in_mesh.faces = MQCompressPy.FaceArray(mesh.faces)
-    in_vert_flags = MQCompressPy.VerticeFlag_UINT8(
-        np.array(vert_flags).astype(np.uint8)
-    )
-    compressed_data, error_code = MQCompressPy.compressMesh_UINT8(
-        in_mesh, in_vert_flags
-    )
-    # with open('mesh.drc', 'wb') as f:
-    #     f.write(compressed_data)
+    in_vert_flags = MQCompressPy.VerticeFlag(vert_flags)
+    compressed_data, error_code = MQCompressPy.compressMesh(in_mesh, in_vert_flags)
     if error_code == 0:
         b64_bytes = base64.b64encode(compressed_data)
         b64_str = b64_bytes.decode("utf-8")
         return b64_str
     else:
         assert "drc compress error"
+
+
+def decompress_drc_int16(compressed_data):
+    compressed_data = base64.b64decode(compressed_data)
+    out_mesh = MQCompressPy.MQC_Mesh()
+    out_flags = MQCompressPy.VerticeFlag()
+    out_mesh_, out_flags, error_code = MQCompressPy.decompressMesh(compressed_data)
+    out_mesh = trimesh.Trimesh()
+    out_mesh.vertices = out_mesh_.verts
+    out_mesh.faces = out_mesh_.faces
+    return out_mesh, out_flags
 
 
 def write_drc(drc, file):
@@ -126,23 +179,52 @@ def handler(event, context):
             inner.apply_transform(event["ai_matrix"])
             event["inner"] = write_mesh_bytes(inner)
 
-            standard = read_mesh_bytes(event["standard"])
+            standard, occ_id = decompress_drc(event["standard"])
             standard.apply_transform(event["new_transform_list"][1])
             standard.apply_transform(event["new_transform_list"][0])
             standard.apply_transform(event["new_transform_list"][2])
             standard.apply_transform(event["ai_matrix"])
-            event["standard"] = write_mesh_bytes(standard)
+            event["standard"] = standard
+            event["occ_id"] = np.where(np.array(occ_id) == 1)[0]
+
+
+            # standard, out_flags = decompress_drc(event["standard"])
+            # standard.apply_transform(event["new_transform_list"][1])
+            # standard.apply_transform(event["new_transform_list"][0])
+            # standard.apply_transform(event["new_transform_list"][2])
+            # standard.apply_transform(event["ai_matrix"])
+            # event["standard"] = standard
+            # config = {}
+            # config['occl_points'] = np.where((np.array(out_flags) & (1 << 0)) != 0)[0]
+            # config['adj1_points'] = np.where((np.array(out_flags) & (1 << 1)) != 0)[0]
+            # config['adj2_points'] = np.where((np.array(out_flags) & (1 << 2)) != 0)[0]
+            # config['fcm_points'] = np.where((np.array(out_flags) & (1 << 3)) != 0)[0]
+            # config['nfcm_points'] = np.where((np.array(out_flags) & (1 << 4)) != 0)[0]
+            # config['fcd_points'] = np.where((np.array(out_flags) & (1 << 5)) != 0)[0]
+            # config['nfcd_points'] = np.where((np.array(out_flags) & (1 << 6)) != 0)[0]
+            # config['oc_points'] = np.where((np.array(out_flags) & (1 << 7)) != 0)[0]
+            
 
         post_out = post(event)
-        crown = compress_drc(
-            post_out.mesh,
-            [
-                post_out.points_inner_id,
-                post_out.points_edge_outer_id,
-                post_out.points_edge_inner_id,
-                # post_out.points_edge_id,
-            ],
-        )
+        if post_out.occ_id is not None:
+            crown = compress_drc(
+                post_out.mesh,
+                [
+                    post_out.points_inner_id,
+                    post_out.points_edge_outer_id,
+                    post_out.points_edge_inner_id,
+                    post_out.mesh.occ_id.idx,
+                ],
+            )
+        else:
+            crown = compress_drc(
+                post_out.mesh,
+                [
+                    post_out.points_inner_id,
+                    post_out.points_edge_outer_id,
+                    post_out.points_edge_inner_id,
+                ],
+            )
         out = compress_drc(post_out.mesh_outside)
         inner = compress_drc(post_out.mesh_beiya)
         thickness_shell = compress_drc(post_out.thickness_shell)
@@ -208,15 +290,25 @@ def handler(event, context):
             post_out.mesh.apply_transform(
                 np.linalg.pinv(event["new_transform_list"][1])
             )
-            crown = compress_drc(
-                post_out.mesh,
-                [
-                    post_out.points_inner_id,
-                    post_out.points_edge_outer_id,
-                    post_out.points_edge_inner_id,
-                    # post_out.points_edge_id,
-                ],
-            )
+            if post_out.occ_id is not None:
+                crown = compress_drc(
+                    post_out.mesh,
+                    [
+                        post_out.points_inner_id,
+                        post_out.points_edge_outer_id,
+                        post_out.points_edge_inner_id,
+                        post_out.mesh.occ_id.idx,
+                    ],
+                )
+            else:
+                crown = compress_drc(
+                    post_out.mesh,
+                    [
+                        post_out.points_inner_id,
+                        post_out.points_edge_outer_id,
+                        post_out.points_edge_inner_id,
+                    ],
+                )
 
             post_out.mesh_outside.apply_transform(np.linalg.pinv(event["ai_matrix"]))
             post_out.mesh_outside.apply_transform(
@@ -267,6 +359,8 @@ def handler(event, context):
             },
             "cpu_info_json": cpu_info_json,
             "cpu_input_json": cpu_input_json,
+            "self_intersecting": post_out.self_intersecting,
+            "thick_shell_hit": post_out.colloision,
         }
 
         print("suncess postprocess")
@@ -282,6 +376,94 @@ if __name__ == "__main__":
     import os
     import time
 
+    # dir_path = "test_data_/muti_crown/post"
+    # files = os.listdir(dir_path)
+    # error_file = [
+    #     "cf576eee-361d-4622-8205-ba5987006c19",
+    #     "db1058fe-e21e-4ae9-bc81-c3bc5bd78f99",
+    # ]
+    # for file in files:
+    #     if file in error_file:
+    #         continue
+    #     # file = '9fdb1618-3a1e-4383-bb4e-72e719700997'
+    #     print(1111, file)
+    #     post_case = os.listdir(os.path.join(dir_path, file))
+    #     for case in post_case:
+    #         if not os.path.exists(
+    #             os.path.join(dir_path, file, case, "crown_post.json")
+    #         ):
+    #             continue
+    #         else:
+    #             if os.path.exists(
+    #                 os.path.join(dir_path, file, case, "out3", "fill_gap.stl")
+    #             ):
+    #                 # continue
+    #                 mesh = trimesh.load(
+    #                     os.path.join(dir_path, file, case, "out3", "fill_gap.stl")
+    #                 )
+    #                 # mesh.show()
+    #                 print
+                # with open(os.path.join(dir_path, file, case, "crown_post.json"), "r") as f:
+                #     event = json.load(f)
+                # event["test"] = True
+                # event["save_path"] = os.path.join(dir_path, file, case, 'out3')
+                # out = handler(event, "")
+                # with open(os.path.join(dir_path, file, case, 'out3', "post.json"), "w") as f:
+                #     f.write(json.dumps(out["Msg"]["data"]))
+                # try:
+                #     mesh = trimesh.load(os.path.join(dir_path, file, case, 'out2', 'fill_gap.stl'))
+                #     thick_shell = trimesh.load(os.path.join(dir_path, file, case, 'out2', 'thickness_shell.stl'))
+                # except:
+                #     continue
+                # c = trimesh.collision.CollisionManager()
+                # c.add_object('crown', mesh)
+                # colloision = c.in_collision_single(thick_shell)
+                # if colloision:
+                #     print(file)
+                # with open(os.path.join(dir_path, file, case, 'out2', "post.json"), 'r') as f:
+                #     data = json.load(f)
+                # crown, flag = decompress_drc(data['crown'])
+                # inner = crown.as_open3d.select_by_index(np.where(np.array(flag) == 1)[0])
+                # inner = trimesh.Trimesh(inner.vertices, inner.triangles)
+                # outer = trimesh.load(os.path.join(dir_path, file, case, 'out2', 'mesh_out.stl'))
+                # from crown_cpu import get_thickness_gap
+                # inner.invert()
+                # thick_shell = get_thickness_gap(inner, outer)
+                # thick_shell.export(os.path.join(dir_path, file, case, 'out2', 'thickness_shell.stl'))
+        # break
+    # params = {
+    #     "occlusal_distance": 0.3,
+    #     "ad_gap": -0.03,
+    #     "prox_or_occlu": 2,
+    #     "adjust_crown": 0,
+    #     "morph_template": "st_tooth",
+    # }
+
+    # with open("test_data_/test/output.json", "r") as f:
+    #     event_gpu = json.load(f)
+
+    # with open("test_data_/test/input.json", "r") as f:
+    #     event = json.load(f)
+
+    # with open("test_data_/test/output_std.json", "r") as f:
+    #     event_std = json.load(f)['cpu_std_json']
+    # # mesh_beiya = write_mesh_bytes(trimesh.load('test_data_/muti_crown/case2/mesh_beiya.stl'))
+    # # event['inner'] = mesh_beiya
+    # # event["standard"] = event_gpu["crown_res"]["16"]["pred_st"]
+    # # event["multi_restoration"] = True
+    # for k, v in event_gpu["cpu_process_info"].items():
+    #     if k not in event.keys():
+    #         event[k] = v
+    # for k, v in event_std.items():
+    #     if k not in event.keys():
+    #         event[k] = v
+    # event["paras"] = params
+    # event['test'] = True
+    # event['save_path'] = 'test_data_/test'
+    # out = handler(event, "")
+    # with open("test_data_/muti_crown/case2/post.json", "w") as f:
+    #     f.write(json.dumps(out["Msg"]["data"]))
+
     # params = {
     #     "occlusal_distance": 0.3,
     #     "ad_gap": -0.03,
@@ -289,84 +471,18 @@ if __name__ == "__main__":
     #     "adjust_crown": 1,
     #     "morph_template": "st_tooth",
     # }
-    # path = r"test_data_/月牙手工牙冠订单-200份-20250715"
-    # dirs = ["50-2", "50-3", "50-4", "50-5"]
-    # error_list = []
-    # pass_id = [
-    #     # 'e1dc-7771', # 备牙id错误
-    #     # 'c281-9644', # 备牙id错误
-    #     # '7916-5156', # 备牙id错误
-    #     # '62c7-7572',  # 嵌体数据
-    #     # '7c62-3711',  # 备牙边缘错误
-    #     # # '#12028', # 自相交 邻牙调整
-
-    #     # '2d89d1ea36504dcfa73f', # 对颌距离判断错误 ?  对颌有飞边, 可以生成但缝合失败
-    #     # '6ebf-7321',  # 初始位置不佳，咬合调整错误  ?  没有空间
-
-    #     # 'cce6-0503',  # 咬合调整错误  ?  没有空间
-
-    #     # '838b-2912',  # 初始位置不佳 ?  没有空间
-    #     # '917a-4299',  # 网格结构问题，需要修复  ?  可以生成但缝合失败
-
-    #     # # 成功101
-    # ]
-    # for dir in dirs:
-    #     # dir = '50-2'
-    #     cases = os.listdir(os.path.join(path, dir))
-    #     for case in cases:
-    #         # if case in pass_id:
-    #         #     continue
-    #         # case = '603f-5397'
-    #         if os.path.exists(os.path.join(path, dir, case, "succes_res.json")):
-    #             with open(os.path.join(path, dir, case, "succes_res.json"), "r") as f:
-    #                 event_ = json.load(f)["Msg"]["data"]
-    #             if os.path.exists(os.path.join(path, dir, case, "std.json")):
-    #                 if os.path.exists(os.path.join(path, dir, case, "post.json")):
-    #                     continue
-    #                 print(case)
-    #                 with open(os.path.join(path, dir, case, "std.json"), "r") as f:
-    #                     event_std = json.load(f)
-    #                 try:
-    #                     event = event_["cpu_process_info"]
-    #                     for k, v in event_std["cpu_std_json"].items():
-    #                         if k not in event.keys():
-    #                             event[k] = v
-    #                     model_name = event_['pred_filestem_name']
-    #                     standard = trimesh.load(f'/home/wanglong/pyproject/lambda_crown/cad_git/Merge_OriginalSTL/{model_name}.stl')
-    #                     standard.apply_transform(event_['spatial_loc_prediction_transform'])
-    #                     event['standard'] = standard
-    #                     event["crown_rot_matirx"] = np.eye(4)
-    #                     event["inner"] = event["mesh_beiya"]
-    #                     event["paras"] = params
-    #                     event["pre_tag"] = "std"
-    #                     event["test"] = True
-    #                     event["save_path"] = os.path.join(path, dir, case)
-    #                     s1 = time.time()
-    #                     out = handler(event, os.path.join(path, dir, case))
-    #                     s2 = time.time()
-    #                     print(s2 - s1)
-    #                     with open(os.path.join(path, dir, case, "post.json"), "w") as f:
-    #                         f.write(json.dumps(out["Msg"]["data"]))
-    #                 except Exception as e:
-    #                     error_list.append(case)
-    #     #     break
-    #     # break
-    # with open(os.path.join(path, "error_post_list.txt"), "w") as f:
-    #     f.write("\n".join(error_list))
-    params = {
-        "occlusal_distance": 0.3,
-        "ad_gap": -0.03,
-        "prox_or_occlu": 2,
-        "adjust_crown": 1,
-        "morph_template": "st_tooth",
-    }
-    with open("test_data_/muti_crown/response.json", "r") as f:
-        event_gpu = json.load(f)["Msg"]["data"]
-
-    with open("test_data_/muti_crown/std.json", "r") as f:
+    # with open("test_data_/test/crown_post_36.json", "r") as f:
+    #     event = json.load(f)
+    with open("test_data_/thick_shell/095193d9-dbbd-4ce0-831f-5ad15edf8a87/crown_post.json", "r") as f:
         event = json.load(f)
-    event["standard"] = event_gpu["crown_res"]["47"]["pred_st"]
-    event["multi_restoration"] = True
+    # with open("/home/wanglong/下载/data/1/response_pcd.json", "r") as f:
+    #     event_out = json.load(f)
+    # event_input = event['cpu_input_json']
+    # for k, v in event_input.items():
+    #     event[k] = v
+    event["test"] = True
+    event["save_path"] = 'test_data_/thick_shell/095193d9-dbbd-4ce0-831f-5ad15edf8a87'
+    event["paras"]["fill_undercut"] = True
     out = handler(event, "")
-    with open("test_data_/muti_crown/post.json", "w") as f:
+    with open("test_data_/thick_shell/095193d9-dbbd-4ce0-831f-5ad15edf8a87/post.json", "w") as f:
         f.write(json.dumps(out["Msg"]["data"]))

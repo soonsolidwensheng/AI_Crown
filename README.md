@@ -1,3 +1,85 @@
+# 25年11月6日更新
+新增register_preop_to_postop接口，在术前流程中得到术前模型匹配术后模型的旋转矩阵，参数如下
+
+**输如**
+
+```json
+{   
+    "preop_teeth": "dict",  // 术前模型的牙齿分割结果(包括上下颌所有牙齿)
+    "postop_teeth": "dict", // 术后模型的牙齿分割结果(包括上下颌所有牙齿)
+}
+```
+
+```json
+{
+  "preop_to_postop": {
+    "upper_matrix": "list", // 4×4矩阵，术前上颌变换至术后位置
+    "lower_matrix": "list"  // 4×4矩阵，术前下颌变换至术后位置
+  },
+  "postop_to_preop": {
+    "upper_matrix": "list", // 4×4矩阵，术后上颌变换至术前位置  
+    "lower_matrix": "list"  // 4×4矩阵，术后下颌变换至术前位置
+  }
+}
+```
+
+# 25年9月25日更新内容
+1、post， stitch接口输出增加self_intersecting（检测生成的牙冠是否有自相交），thick_shell_hit（检测厚度外壳是否和牙冠有碰撞）
+2、post，stitch接口输出drc中增加咬合面区域的标识，标识为4
+## postprocess
+
+**输出**
+
+```json
+{   
+    // ...之前的参数
+    "self_intersecting": "bool",
+    "thick_shell_hit": "bool"
+}
+```
+
+## stitch_edge
+
+**输出**
+
+```json
+{   
+    // ...之前的参数
+    "self_intersecting": "bool",
+    "thick_shell_hit": "bool"
+}
+```
+
+# 25年9月3日更新内容
+术前镜像流程接入，代替之前的stdcrown接口
+
+## stdcrown
+
+**术前输入Input**
+
+```json
+{   
+    // ...之前的参数
+    "preop_or_mirror": "preop", // 表示进行术前流程
+    "std_crown": "drc", // gpu输出的初始位置牙冠
+    "pre_op_crown": "drc",  // 术前牙冠
+    "preop_matrix": "list"  // 术前匹配术后的变换矩阵
+    // 删除该参数 "pre_op_teeth": "drc",  // 术前牙颌
+}
+```
+
+**镜像输入Input**
+
+```json
+{   
+    // ...之前的参数
+    "preop_or_mirror": "mirror", // 表示进行镜像流程
+    "std_crown": "drc", // gpu输出的初始位置牙冠
+    "mirror_id": "str",  // 镜像位置牙冠id
+}
+```
+
+
 # 25年7月24日更新内容
 多修复体参数说明，输入根据gpu参数有变化，输出与单修复体一致
 

@@ -8,7 +8,38 @@ from scipy.spatial import cKDTree
 from sklearn.cluster import DBSCAN, KMeans
 from sklearn.linear_model import LinearRegression
 from scipy.spatial.transform import Rotation as R
+from scipy.spatial.distance import cdist
 from sklearn.metrics import r2_score, mean_squared_error
+import matplotlib.pyplot as plt
+import copy
+
+def normalize(v):
+    return v / np.linalg.norm(v)
+
+
+def rotation_matrix_from_vectors(vec1, vec2):
+    """Find the rotation matrix that aligns vec1 to vec2"""
+    a, b = normalize(vec1), normalize(vec2)
+    v = np.cross(a, b)
+    c = np.dot(a, b)
+    s = np.linalg.norm(v)
+    if s == 0:
+        return np.eye(3)  # 平行或反向
+    kmat = np.array([[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]])
+    rotation_matrix = np.eye(3) + kmat + kmat.dot(kmat) * ((1 - c) / (s**2))
+    M = np.eye(4)
+    M[:3, :3] = rotation_matrix
+    return M, rotation_matrix
+
+def getBoundaryPoints(mesh):
+    """get the boundary points of a mesh IN THE ORDER of how they appear in the mesh"""
+    if type(mesh) is not trimesh.Trimesh:
+        mesh = trimesh.Trimesh(mesh.vertices, mesh.triangles)
+    unique_elements, counts = np.unique(mesh.edges_sorted, return_counts=True, axis=0)
+    edges = unique_elements[np.where(counts == 1)[0]]
+    boundary_point_id = np.unique(edges.flatten())
+    boundary_point = mesh.vertices[boundary_point_id]
+    return boundary_point, boundary_point_id
 
 def align_mesh_to_direction(mesh, direction):
     # 计算旋转矩阵，使得 direction 与 y 轴负方向对齐
@@ -319,7 +350,7 @@ def fitune_vertices(new_vertices, center_vertices, distance_threshold=0.6, angle
     new_vertices = new_vertices[original_order_indices]
     return new_vertices
 
-def filling_undercut(mesh, undercut_direction, save_path=None):
+def filling_undercut(mesh, undercut_direction, save_path=None, display=False):
 
     mesh.compute_vertex_normals()
     mesh.remove_duplicated_vertices()
@@ -332,8 +363,14 @@ def filling_undercut(mesh, undercut_direction, save_path=None):
         mesh = mesh.simplify_quadric_decimation(target_triangles)
     
     # 变换模型使得倒凹方向与 y 轴负方向一致
-    trans_mesh, rotation_matrix = align_mesh_to_direction(mesh, undercut_direction)
+    # trans_mesh, rotation_matrix = align_mesh_to_direction(mesh, undercut_direction)
+    M, rotation_matrix = rotation_matrix_from_vectors(undercut_direction, [0, -1, 0])
+    trans_mesh = copy.copy(mesh)
+    vertices = np.asarray(trans_mesh.vertices)
+    transformed_vertices = vertices @ rotation_matrix.T
+    trans_mesh.vertices = o3d.utility.Vector3dVector(transformed_vertices)
     print('Rotation matrix:', rotation_matrix)
+    
     #o3d.io.write_triangle_mesh(path + 'trans_mesh.stl', mesh)
 
     # 判断边缘是否处于倒凹阴影内，ids为带顺序的边缘顶点索引
@@ -344,6 +381,15 @@ def filling_undercut(mesh, undercut_direction, save_path=None):
     blocking_vertices, intersection_vertices, normals = find_blocking_vertices(trans_mesh, direction=[0, -1, 0])
     print(f'Number of blocking vertices: {len(blocking_vertices)}')
     print(f'Number of intersection vertices: {len(intersection_vertices)}')
+
+    if display:
+        vis_list1 = [trans_mesh, o3d.geometry.TriangleMesh.create_coordinate_frame(size=5)] # 可视化列表
+        blocking_pc = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(np.array(blocking_vertices)))
+        blocking_pc.paint_uniform_color([1, 0, 0])
+        intersection_pc = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(np.array(intersection_vertices)))
+        intersection_pc.paint_uniform_color([1, 1, 0])
+        vis_list1 += [blocking_pc, intersection_pc]
+        o3d.visualization.draw_geometries(vis_list1)
     
     if len(blocking_vertices) > 0:
     # 聚类寻找簇原点
@@ -363,20 +409,88 @@ def filling_undercut(mesh, undercut_direction, save_path=None):
         if len(shadow_vertices) > 0:
             #精细化调整移动点
             final_vertices = fitune_vertices(new_vertices, center_vertices)
+
+            if display:
+                vis_list2 = [trans_mesh, o3d.geometry.TriangleMesh.create_coordinate_frame(size=5)] # 可视化列表
+                blocking_pc = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(np.array(blocking_vertices)))
+                blocking_pc.paint_uniform_color([1, 0, 0])
+                intersection_pc = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(np.array(intersection_vertices)))
+                intersection_pc.paint_uniform_color([1, 1, 0])
+                shadow_pc = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(np.array(shadow_vertices)))
+                shadow_pc.paint_uniform_color([0, 0, 1])
+                new_pc = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(np.array(new_vertices)))
+                final_pc = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(np.array(final_vertices)))
+                final_pc.paint_uniform_color([0, 1, 0])
+
+                # x-z平面
+                shadow_points_2d = np.asarray(shadow_pc.points)[:, [0, 2]]
+                new_points_2d = np.asarray(new_pc.points)[:, [0, 2]]
+                final_points_2d = np.asarray(final_pc.points)[:, [0, 2]]
+
+                # 创建二维图像A
+                plt.figure(figsize=(10, 10))
+                plt.scatter(shadow_points_2d[:, 0], shadow_points_2d[:, 1],
+                            c='b', alpha=0.3, label='Shadow Vertices')
+                plt.scatter(blocking_points_2d[:, 0], blocking_points_2d[:, 1],
+                            c='r', alpha=0.8, label='Blocking Vertices')
+                plt.scatter(intersection_points_2d[:, 0], intersection_points_2d[:, 1],
+                            c='y', alpha=0.5, label='Intersection Vertices')
+                plt.scatter(new_points_2d[:, 0], new_points_2d[:, 1],
+                            c='g', alpha=0.5, label='New Vertices')
+
+                plt.gca().invert_yaxis()  # 反转Z轴方向
+                # 设置图像属性
+                plt.title(f'2D Projection of Vertices (Y-Axis Discarded)')
+                plt.xlabel('X Coordinate')
+                plt.ylabel('Z Coordinate')
+                plt.grid(True)
+                plt.legend()
+                plt.tight_layout()
+
+                # 保存和显示
+                # plt.savefig(path + 'all_verticesA.png', dpi=300)
+                plt.show()
+
+                # 创建二维图像B
+                plt.figure(figsize=(10, 10))
+                plt.scatter(new_points_2d[:, 0], new_points_2d[:, 1],
+                            c='m', alpha=0.5, label='New Vertices')
+                plt.scatter(final_points_2d[:, 0], final_points_2d[:, 1],
+                            c='g', alpha=0.5, label='Final Vertices')
+
+                plt.gca().invert_yaxis()  # 反转Z轴方向
+                # 设置图像属性
+                plt.title(f'2D Projection of Vertices (Y-Axis Discarded)')
+                plt.xlabel('X Coordinate')
+                plt.ylabel('Z Coordinate')
+                plt.grid(True)
+                plt.legend()
+                plt.tight_layout()
+
+                # 保存和显示
+                # plt.savefig(path + 'all_verticesB.png', dpi=300)
+                plt.show()
+
+                vis_list2 += [intersection_pc, blocking_pc, shadow_pc, final_pc]
+                o3d.visualization.draw_geometries(vis_list2)
             
             # 使用 KDTree 快速查找最近邻索引
             original_vertices = np.asarray(trans_mesh.vertices)
             tree = cKDTree(original_vertices)
             _, point_idx = tree.query(np.array(shadow_vertices))
 
+            bound_points, bound_indices = getBoundaryPoints(trans_mesh)
+            dist_boundary = cdist(original_vertices[point_idx], bound_points).min(axis=1)
+            dist_mask = dist_boundary > 0.2
+
             # 所有目标坐标（未变形的顶点保持不变，变形的顶点替换为 new_vertices）
             all_point_idx = np.arange(len(original_vertices))
             all_point_dst = original_vertices.copy()
-            all_point_dst[point_idx] = np.array(final_vertices)
+            all_point_dst[point_idx[dist_mask]] = np.array(final_vertices)[dist_mask]
 
             # 执行 TPS 变形
             undercut_filled_mesh = tps(
-                trimesh.Trimesh(vertices=original_vertices, faces=np.asarray(trans_mesh.triangles)),  # 使用 trimesh.Trimesh 对象
+                trimesh.Trimesh(vertices=original_vertices, faces=np.asarray(trans_mesh.triangles), process=False),  # 使用 trimesh.Trimesh 对象
                 point_idx=all_point_idx,
                 point_dst=all_point_dst,
                 lambda_=0.1  # 可调节形变刚度参数

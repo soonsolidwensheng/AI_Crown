@@ -55,7 +55,10 @@ class TrackedTrimesh(trimesh.Trimesh):
         if pt is None:
             if idx is None:
                 return
-            pt = self.vertices[idx]
+            if len(idx) == 0:
+                pt = np.array([])
+            else:
+                pt = self.vertices[idx]
         if idx is None:
             idx = self.find_new_points(pt, mode)
         keypoint = Keypoint(idx, pt)
@@ -135,7 +138,10 @@ class TrackedTrimesh(trimesh.Trimesh):
         当顶点数量不变时，更新所有关键点的坐标
         """
         for keypoint in self.keypoints:
-            keypoint.pt = self.vertices[keypoint.idx]
+            if len(keypoint.idx):
+                keypoint.pt = self.vertices[keypoint.idx]
+            else:
+                keypoint.pt = np.array([])
 
     def _reassign_keypoints(self, new_vertices):
         """
