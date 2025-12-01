@@ -85,25 +85,38 @@ def read_mesh_bytes(buffer):
     return trimesh.Trimesh(vertices=V, faces=F)
 
 
-def adjust_crown_position(crown, other_teeth):
+def adjust_crown_position(crown, other_teeth, beiya_tid=None):
     # 实现牙冠与其他牙齿的位置关系调整的逻辑
     crown_copy = crown.copy()
     crown_copy = crown_copy.simplify_quadratic_decimation(10000)
     adjacent_teeth = []
+    beiya_teeth = []
     c = trimesh.collision.CollisionManager()
-    for tooth in other_teeth:
+    c_crown = trimesh.collision.CollisionManager()
+    c_crown.add_object("crown", crown)
+    for i, tooth in enumerate(other_teeth):
         dist = trimesh.base.proximity.closest_point(
             crown_copy, random.sample(tooth.vertices.tolist(), 100)
         )[1]
         if min(dist) < 1:  # 如果距离小于0.5mm，认为是邻牙
             adjacent_teeth.append(tooth)
+            if beiya_tid[i] == 1:
+                beiya_teeth.append(1)
+            else:
+                beiya_teeth.append(0)
     if len(adjacent_teeth) == 0:
         return crown  # 没有邻牙，直接返回
     elif len(adjacent_teeth) == 1:
-        if adjacent_teeth[0].bounding_box.extents[0] > crown.bounding_box.extents[0]:
-            c.add_object("mesh1", adjacent_teeth[0])
+        if adjacent_teeth[0].bounds[0][0] > crown.bounds[0][0]:
+            if beiya_teeth[0] == 1:
+                c.add_object("mesh1", adjacent_teeth[0].bounding_box)
+            else:
+                c.add_object("mesh1", adjacent_teeth[0])
         else:
-            c.add_object("mesh2", adjacent_teeth[0])
+            if beiya_teeth[0] == 1:
+                c.add_object("mesh2", adjacent_teeth[0].bounding_box)
+            else:
+                c.add_object("mesh2", adjacent_teeth[0])
         is_collision = c.in_collision_single(
             crown,
             return_names=True,
@@ -111,9 +124,12 @@ def adjust_crown_position(crown, other_teeth):
         if is_collision[0]:
             # 有碰撞，对牙冠进行缩小处理
             for i in range(100, 0, -5):
+                crown_copy_2 = crown_copy.copy()
+                crown_copy_2.apply_transform(
+                    trimesh.transformations.compose_matrix([i / 100, 1, 1])
+                )
                 is_collision = c.in_collision_single(
-                    crown,
-                    transform=trimesh.transformations.compose_matrix([i / 100, 1, 1]),
+                    crown_copy_2,
                     return_names=True,
                 )
                 if not is_collision[0]:
@@ -124,8 +140,12 @@ def adjust_crown_position(crown, other_teeth):
         else:
             # 无碰撞，对牙冠进行放大处理
             for i in range(100, 200, 5):
+                crown_copy_2 = crown_copy.copy()
+                crown_copy_2.apply_transform(
+                    trimesh.transformations.compose_matrix([i / 100, 1, 1])
+                )
                 is_collision = c.in_collision_single(
-                    crown,
+                    crown_copy_2,
                     transform=trimesh.transformations.compose_matrix([i / 100, 1, 1]),
                     return_names=True,
                 )
@@ -135,15 +155,24 @@ def adjust_crown_position(crown, other_teeth):
                     )
                     return crown
     elif len(adjacent_teeth) == 2:
-        if (
-            adjacent_teeth[0].bounding_box.extents[0]
-            > adjacent_teeth[1].bounding_box.extents[0]
-        ):
-            c.add_object("mesh1", adjacent_teeth[0])
-            c.add_object("mesh2", adjacent_teeth[1])
+        if adjacent_teeth[0].bounds[0][0] > adjacent_teeth[1].bounds[0][0]:
+            if beiya_teeth[0] == 1:
+                c.add_object("mesh1", adjacent_teeth[0].bounding_box)
+            else:
+                c.add_object("mesh1", adjacent_teeth[0])
+            if beiya_teeth[1] == 1:
+                c.add_object("mesh2", adjacent_teeth[1].bounding_box)
+            else:
+                c.add_object("mesh2", adjacent_teeth[1])
         else:
-            c.add_object("mesh1", adjacent_teeth[1])
-            c.add_object("mesh2", adjacent_teeth[0])
+            if beiya_teeth[1] == 1:
+                c.add_object("mesh1", adjacent_teeth[1].bounding_box)
+            else:
+                c.add_object("mesh1", adjacent_teeth[1])
+            if beiya_teeth[0] == 1:
+                c.add_object("mesh2", adjacent_teeth[0].bounding_box)
+            else:
+                c.add_object("mesh2", adjacent_teeth[0])
         is_collision = c.in_collision_single(
             crown,
             return_names=True,
@@ -152,23 +181,38 @@ def adjust_crown_position(crown, other_teeth):
             if "mesh1" in list(is_collision[1]) and "mesh2" in list(is_collision[1]):
                 # 同时与两个邻牙碰撞，对牙冠进行缩小处理
                 shift = 0
-                for i in range(100, 0, -5):
-                    is_collision = c.in_collision_single(
-                        crown,
-                        transform=trimesh.transformations.compose_matrix(
+                for i in range(100, 0, -2):
+                    crown_copy_2 = crown_copy.copy()
+                    crown_copy_2.apply_transform(
+                        trimesh.transformations.compose_matrix(
                             scale=[i / 100, 1, 1],
                             translate=[shift / 100, 0, 0],
-                        ),
+                        )
+                    )
+                    is_collision = c.in_collision_single(
+                        crown_copy_2,
                         return_names=True,
                     )
-                    if list(is_collision[1]) == ["mesh1"]:
+                    if not is_collision[0]:
+                        crown.apply_transform(
+                            trimesh.transformations.compose_matrix(
+                                scale=[(i + 2) / 100, 1, 1],
+                                translate=[shift / 100, 0, 0],
+                            )
+                        )
+                        return crown
+                    elif list(is_collision[1]) == ["mesh1"]:
                         for j in range(shift, -200, -5):
-                            is_collision = c.in_collision_single(
-                                crown,
-                                transform=trimesh.transformations.compose_matrix(
+                            crown_copy_2 = crown_copy.copy()
+                            crown_copy_2.apply_transform(
+                                trimesh.transformations.compose_matrix(
                                     scale=[i / 100, 1, 1],
                                     translate=[j / 100, 0, 0],
-                                ),
+                                )
+                            )
+
+                            is_collision = c.in_collision_single(
+                                crown_copy_2,
                                 return_names=True,
                             )
                             if list(is_collision[1]) == ["mesh2"]:
@@ -187,20 +231,24 @@ def adjust_crown_position(crown, other_teeth):
                             elif not is_collision[0]:
                                 crown.apply_transform(
                                     trimesh.transformations.compose_matrix(
-                                        scale=[(i + 5) / 100, 1, 1],
+                                        scale=[(i + 2) / 100, 1, 1],
                                         translate=[j / 100, 0, 0],
                                     )
                                 )
                                 return crown
                     elif list(is_collision[1]) == ["mesh2"]:
                         for j in range(shift, 200, 5):
-                            is_collision = c.in_collision_single(
-                                crown,
-                                transform=trimesh.transformations.compose_matrix(
+                            crown_copy_2 = crown_copy.copy()
+                            crown_copy_2.apply_transform(
+                                trimesh.transformations.compose_matrix(
                                     scale=[i / 100, 1, 1],
                                     translate=[j / 100, 0, 0],
-                                    return_names=True,
-                                ),
+                                )
+                            )
+
+                            is_collision = c.in_collision_single(
+                                crown_copy_2,
+                                return_names=True,
                             )
                             if list(is_collision[1]) == ["mesh1"]:
                                 crown.apply_transform(
@@ -218,49 +266,62 @@ def adjust_crown_position(crown, other_teeth):
                             elif not is_collision:
                                 crown.apply_transform(
                                     trimesh.transformations.compose_matrix(
-                                        scale=[(i + 5) / 100, 1, 1],
+                                        scale=[(i + 2) / 100, 1, 1],
                                         translate=[j / 100, 0, 0],
                                     )
                                 )
                                 return crown
-                    elif not is_collision[0]:
-                        crown.apply_transform(
-                            trimesh.transformations.compose_matrix(
-                                scale=[(i + 5) / 100, 1, 1],
-                                translate=[shift / 100, 0, 0],
-                            )
-                        )
-                        return crown
+                    
             elif list(is_collision[1]) == ["mesh1"]:
                 # 只与近中邻牙碰撞，对牙冠先平移后放缩
                 scale = 100
-                for i in range(0, -100, -5):
-                    is_collision = c.in_collision_single(
-                        crown,
-                        transform=trimesh.transformations.compose_matrix(
+                for i in range(0, -100, -2):
+                    crown_copy_2 = crown_copy.copy()
+                    crown_copy_2.apply_transform(
+                        trimesh.transformations.compose_matrix(
                             scale=[scale / 100, 1, 1],
                             translate=[i / 100, 0, 0],
-                        ),
+                        )
+                    )
+
+                    is_collision = c.in_collision_single(
+                        crown_copy_2,
                         return_names=True,
                     )
-                    if list(is_collision[1]) == ["mesh2"]:
-                        scale += 5
-                        crown.apply_transform(
+                    if not is_collision[0]:
+                        scale += 2
+                        crown_copy_2 = crown_copy.copy()
+                        crown_copy_2.apply_transform(
                             trimesh.transformations.compose_matrix(
-                                scale=[scale / 100, 1, 1],
-                                translate=[(i + 2.5) / 100, 0, 0],
+                                scale=[scale / 100, 1, 1], translate=[i / 100, 0, 0]
                             )
                         )
-                        return crown
+                        is_collision = c.in_collision_single(
+                            crown_copy_2,
+                            return_names=True,
+                        )
+                        if "mesh1" in list(is_collision[1]) and "mesh2" in list(
+                            is_collision[1]
+                        ):
+                            crown.apply_transform(
+                                trimesh.transformations.compose_matrix(
+                                    scale=[scale / 100, 1, 1],
+                                    translate=[i / 100, 0, 0],
+                                )
+                            )
+                            return crown
                     elif "mesh1" in list(is_collision[1]) and "mesh2" in list(
                         is_collision[1]
                     ):
-                        for j in range(scale, 0, -5):
-                            is_collision = c.in_collision_single(
-                                crown,
-                                transform=trimesh.transformations.compose_matrix(
+                        for j in range(scale, 0, -2):
+                            crown_copy_2 = crown_copy.copy()
+                            crown_copy_2.apply_transform(
+                                trimesh.transformations.compose_matrix(
                                     scale=[j / 100, 1, 1], translate=[i / 100, 0, 0]
-                                ),
+                                )
+                            )
+                            is_collision = c.in_collision_single(
+                                crown_copy_2,
                                 return_names=True,
                             )
                             if list(is_collision[1]) == ["mesh1"]:
@@ -269,7 +330,7 @@ def adjust_crown_position(crown, other_teeth):
                             elif list(is_collision[1]) == ["mesh2"]:
                                 crown.apply_transform(
                                     trimesh.transformations.compose_matrix(
-                                        scale=[(j + 5) / 100, 1, 1],
+                                        scale=[(j + 2) / 100, 1, 1],
                                         translate=[i / 100, 0, 0],
                                     )
                                 )
@@ -277,18 +338,46 @@ def adjust_crown_position(crown, other_teeth):
                             elif not is_collision[0]:
                                 crown.apply_transform(
                                     trimesh.transformations.compose_matrix(
-                                        scale=[(j + 5) / 100, 1, 1],
+                                        scale=[(j + 2) / 100, 1, 1],
                                         translate=[i / 100, 0, 0],
                                     )
                                 )
                                 return crown
-                    elif not is_collision[0]:
-                        scale += 5
-                        is_collision = c.in_collision_single(
-                            crown,
-                            transform=trimesh.transformations.compose_matrix(
+                    elif list(is_collision[1]) == ["mesh2"]:
+                        scale += 2
+                        crown.apply_transform(
+                            trimesh.transformations.compose_matrix(
+                                scale=[scale / 100, 1, 1],
+                                translate=[(i + 2.5) / 100, 0, 0],
+                            )
+                        )
+                        return crown
+                    
+                    
+            elif list(is_collision[1]) == ["mesh2"]:
+                # 只与远中邻牙碰撞，对牙冠先平移后放缩
+                scale = 100
+                for i in range(0, 100, 5):
+                    crown_copy_2 = crown_copy.copy()
+                    crown_copy_2.apply_transform(
+                        trimesh.transformations.compose_matrix(
+                            scale=[scale / 100, 1, 1], translate=[i / 100, 0, 0]
+                        )
+                    )
+                    is_collision = c.in_collision_single(
+                        crown_copy_2,
+                        return_names=True,
+                    )
+                    if not is_collision[0]:
+                        scale += 2
+                        crown_copy_2 = crown_copy.copy()
+                        crown_copy_2.apply_transform(
+                            trimesh.transformations.compose_matrix(
                                 scale=[scale / 100, 1, 1], translate=[i / 100, 0, 0]
-                            ),
+                            )
+                        )
+                        is_collision = c.in_collision_single(
+                            crown_copy_2,
                             return_names=True,
                         )
                         if "mesh1" in list(is_collision[1]) and "mesh2" in list(
@@ -301,35 +390,18 @@ def adjust_crown_position(crown, other_teeth):
                                 )
                             )
                             return crown
-            elif list(is_collision[1]) == ["mesh2"]:
-                # 只与远中邻牙碰撞，对牙冠先平移后放缩
-                scale = 100
-                for i in range(0, 100, 5):
-                    is_collision = c.in_collision_single(
-                        crown,
-                        transform=trimesh.transformations.compose_matrix(
-                            scale=[scale / 100, 1, 1], translate=[i / 100, 0, 0]
-                        ),
-                        return_names=True,
-                    )
-                    if list(is_collision[1]) == ["mesh1"]:
-                        scale += 5
-                        crown.apply_transform(
-                            trimesh.transformations.compose_matrix(
-                                scale=[scale / 100, 1, 1],
-                                translate=[(i - 2.5) / 100, 0, 0],
-                            )
-                        )
-                        return crown
                     elif "mesh1" in list(is_collision[1]) and "mesh2" in list(
                         is_collision[1]
                     ):
-                        for j in range(scale, 0, -5):
-                            is_collision = c.in_collision_single(
-                                crown,
-                                transform=trimesh.transformations.compose_matrix(
+                        for j in range(scale, 0, -2):
+                            crown_copy_2 = crown_copy.copy()
+                            crown_copy_2.apply_transform(
+                                trimesh.transformations.compose_matrix(
                                     scale=[j / 100, 1, 1], translate=[i / 100, 0, 0]
-                                ),
+                                )
+                            )
+                            is_collision = c.in_collision_single(
+                                crown_copy_2,
                                 return_names=True,
                             )
                             if list(is_collision[1]) == ["mesh2"]:
@@ -338,7 +410,7 @@ def adjust_crown_position(crown, other_teeth):
                             elif list(is_collision[1]) == ["mesh1"]:
                                 crown.apply_transform(
                                     trimesh.transformations.compose_matrix(
-                                        scale=[(j + 5) / 100, 1, 1],
+                                        scale=[(j + 2) / 100, 1, 1],
                                         translate=[i / 100, 0, 0],
                                     )
                                 )
@@ -346,36 +418,30 @@ def adjust_crown_position(crown, other_teeth):
                             elif not is_collision[0]:
                                 crown.apply_transform(
                                     trimesh.transformations.compose_matrix(
-                                        scale=[(j + 5) / 100, 1, 1],
+                                        scale=[(j + 2) / 100, 1, 1],
                                         translate=[i / 100, 0, 0],
                                     )
                                 )
                                 return crown
-                    elif not is_collision[0]:
-                        scale += 5
-                        is_collision = c.in_collision_single(
-                            crown,
-                            transform=trimesh.transformations.compose_matrix(
-                                scale=[scale / 100, 1, 1], translate=[i / 100, 0, 0]
-                            ),
-                            return_names=True,
-                        )
-                        if "mesh1" in list(is_collision[1]) and "mesh2" in list(
-                            is_collision[1]
-                        ):
-                            crown.apply_transform(
-                                trimesh.transformations.compose_matrix(
-                                    scale=[scale / 100, 1, 1],
-                                    translate=[i / 100, 0, 0],
-                                )
+                    elif list(is_collision[1]) == ["mesh1"]:
+                        scale += 2
+                        crown.apply_transform(
+                            trimesh.transformations.compose_matrix(
+                                scale=[scale / 100, 1, 1],
+                                translate=[(i - 2.5) / 100, 0, 0],
                             )
-                            return crown
+                        )
+                        return crown
+                    
+                    
+        else:
+            return crown  # 无碰撞，直接返回
     else:
         return crown  # 邻牙超过2个，暂不处理，直接返回
 
 
 def mirror_crown(
-    all_other_crowns, beiya_id, crown_rot_matirx, ai_matrix, std_crown, mirror_id
+    all_other_crowns, beiya_id, crown_rot_matirx, ai_matrix, std_crown, mirror_id, prep_tid
 ):
     dac = DAC(all_other_crowns, None, int(beiya_id), 0)
     curve, _, control_points, T, A = dac.get_dac_nurbs()
@@ -394,6 +460,12 @@ def mirror_crown(
     )
     bio_crown.apply_transform(np.array(crown_rot_matirx[2]))
     bio_crown.apply_transform(ai_matrix)
+
+    std_crown.apply_transform(
+        np.array(crown_rot_matirx[0]) @ np.array(crown_rot_matirx[1])
+    )
+    std_crown.apply_transform(np.array(crown_rot_matirx[2]))
+    std_crown.apply_transform(ai_matrix)
 
     n, d = get_mirror_plane(control_points[:50], control_points[50:][::-1])
 
@@ -414,23 +486,82 @@ def mirror_crown(
     bio_crown_mirror.apply_scale(scale)
     bio_crown_mirror.apply_translation(std_crown.bounding_box.centroid)
 
-    if int(beiya_id) < 30: 
-        other_teeth = [
-            read_mesh_bytes(v) for k, v in all_other_crowns.items() if k != beiya_id and int(k) < 30
+    if int(beiya_id) < 30:
+        other_teeth_info = [
+            (1, read_mesh_bytes(v)) if int(k) in prep_tid else (0, read_mesh_bytes(v))
+            for k, v in all_other_crowns.items()
+            if k != beiya_id and int(k) < 30
         ]
+        other_teeth = [x[1] for x in other_teeth_info]
+        beiya_tid = [x[0] for x in other_teeth_info]
     else:
-        other_teeth = [
-            read_mesh_bytes(v) for k, v in all_other_crowns.items() if k != beiya_id and int(k) > 30
+        other_teeth_info = [
+            (1, read_mesh_bytes(v)) if int(k) in prep_tid else (0, read_mesh_bytes(v))
+            for k, v in all_other_crowns.items()
+            if k != beiya_id and int(k) > 30
         ]
-    bio_crown_mirror.apply_transform(
-        np.array(crown_rot_matirx[0]) @ np.array(crown_rot_matirx[1])
-    )
-    bio_crown_mirror.apply_transform(np.array(crown_rot_matirx[2]))
-    bio_crown_mirror.apply_transform(ai_matrix)
+        other_teeth = [x[1] for x in other_teeth_info]
+        beiya_tid = [x[0] for x in other_teeth_info]
     for m in other_teeth:
         m.apply_transform(np.array(crown_rot_matirx[0]) @ np.array(crown_rot_matirx[1]))
         m.apply_transform(np.array(crown_rot_matirx[2]))
         m.apply_transform(ai_matrix)
-    bio_crown_mirror = adjust_crown_position(bio_crown_mirror, other_teeth)
+    bio_crown_mirror = adjust_crown_position(bio_crown_mirror, other_teeth, beiya_tid)
 
+    return bio_crown_mirror
+
+
+def mirror_crown_(
+    arch_seg_crowns,
+    all_other_crowns,
+    beiya_id,
+    mirror_matrix,
+    crown_rot_matirx,
+    ai_matrix,
+    std_crown,
+    mirror_id,
+):
+    bio_crown = read_mesh_bytes(arch_seg_crowns[mirror_id])
+    bio_crown.apply_transform(np.array(mirror_matrix[0]) @ np.array(mirror_matrix[1]))
+    if (int(beiya_id[0]) - int(mirror_id[0])) % 2 != 0:
+        quaternion = trimesh.transformations.quaternion_about_axis(
+                np.pi, [0, 1, 0]
+            )
+        rotation_matrix = trimesh.transformations.quaternion_matrix(quaternion)
+        bio_crown.apply_transform(rotation_matrix)
+    std_crown.apply_transform(
+        np.array(crown_rot_matirx[0]) @ np.array(crown_rot_matirx[1])
+    )
+    std_crown.apply_transform(np.array(crown_rot_matirx[2]))
+    std_crown.apply_transform(ai_matrix)
+    # scale = (std_crown.bounds[1] - std_crown.bounds[0]) / (
+    #     bio_crown.bounds[1] - bio_crown.bounds[0]
+    # )
+    bio_crown.apply_translation(-bio_crown.bounding_box.centroid)
+    # bio_crown.apply_scale(scale)
+    bio_crown.apply_translation(std_crown.bounding_box.centroid)
+    bio_crown_morph, bio_crown_reg = bio_morphing(bio_crown, std_crown, None, False)
+    scale = (std_crown.bounds[1] - std_crown.bounds[0]) / (
+        bio_crown_morph.bounds[1] - bio_crown_morph.bounds[0]
+    )
+    bio_crown_morph.apply_translation(-bio_crown_morph.bounding_box.centroid)
+    bio_crown_morph.apply_scale(scale)
+    bio_crown_morph.apply_translation(std_crown.bounding_box.centroid)
+    if int(beiya_id) < 30:
+        other_teeth = [
+            read_mesh_bytes(v)
+            for k, v in all_other_crowns.items()
+            if k != beiya_id and int(k) < 30
+        ]
+    else:
+        other_teeth = [
+            read_mesh_bytes(v)
+            for k, v in all_other_crowns.items()
+            if k != beiya_id and int(k) > 30
+        ]
+    for m in other_teeth:
+        m.apply_transform(np.array(crown_rot_matirx[0]) @ np.array(crown_rot_matirx[1]))
+        m.apply_transform(np.array(crown_rot_matirx[2]))
+        m.apply_transform(ai_matrix)
+    bio_crown_mirror = adjust_crown_position(bio_crown_morph, other_teeth)
     return bio_crown_mirror

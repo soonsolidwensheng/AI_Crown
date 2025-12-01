@@ -10,7 +10,6 @@ import networkx as nx
 import numpy as np
 import open3d as o3d
 import pylfda
-import pymeshlab
 import trimesh
 from pytransform3d.rotations import matrix_from_two_vectors
 from scipy.spatial import KDTree, transform
@@ -29,7 +28,7 @@ from undercut_util import get_insert_direction
 
 
 def read_mesh_bytes(buffer):
-    if buffer is None or buffer == '':
+    if buffer is None or buffer == "":
         return None
     a = base64.b64decode(buffer)
     mesh_object = DracoPy.decode_buffer_to_mesh(a)
@@ -974,7 +973,7 @@ def transform_method_(
     # mesh1 = trimesh.Trimesh(mesh1[0], mesh1[1])
     # mesh2 = trimesh.Trimesh(mesh2[0], mesh2[1])
     # mesh_beiya = trimesh.Trimesh(mesh_beiya[0], mesh_beiya[1])
-    
+
     if int(miss_id) < 30:
         up_low = 0  # up
     else:
@@ -1308,7 +1307,7 @@ def stitch_(mesh_to_stitch, mesh_before_stitch, edge_after, type="inner"):
                         new_faces.append([p1, p0, b_0_1])
                 else:
                     new_faces.append([p1, p0, b_0_1])
-            elif i_0 == np.max(dist_index):
+            elif i_0 == np.max(edge_after):
                 new_faces.append([p1, p0, b_0_0])
             else:
                 new_faces.append([p1, p0, b_0_1])
@@ -1559,6 +1558,7 @@ class GenerateCrowns:
         self.multi_restoration = False
         self.preop_or_mirror = ""
         self.std_crown = None
+        self.thickness_shell = None
         self.pre_op_crown = None
         self.pre_op_teeth = None
         self.mirror_id = None
@@ -2503,6 +2503,7 @@ class GenerateCrowns:
         distances_source, _ = compute_signed_distance(poisson_mesh, self.mesh.vertices)
         mesh_o3d.remove_vertices_by_index(np.where(distances_source > 0)[0])
         mesh_out = trimesh.Trimesh(mesh_o3d.vertices, mesh_o3d.triangles)
+        mesh_out = get_biggest_mesh(mesh_out)
         interest_verts = self.mesh.nearest.vertex(mesh_out.vertices)[1]
         mesh = pypruners.pruner(
             self.mesh.vertices, self.mesh.faces, interest_verts, 1.0, -2.5, 1.5
@@ -3756,21 +3757,29 @@ class GenerateCrowns:
             self.mesh.export(f"{self.save_path}/mesh_out.stl")
             mesh_out.export(f"{self.save_path}/mesh_out_after.stl")
         if self.handler_name in ["post", "stitch"]:
-            # mesh_inner_copy = mesh_out.as_open3d.select_by_index(self.points_inner_id)
-            # mesh_inner_copy = trimesh.Trimesh(
-            #     mesh_inner_copy.vertices, mesh_inner_copy.triangles
-            # )
-            # mesh_inner_copy.invert()
-            # self.thickness_shell = get_thickness_gap(mesh_inner_copy)
-            boundary = getBoundaryPoints(self.thickness_shell)[1]
-            neighbors = get_neighbors(boundary, 2, self.thickness_shell)
-            neighbors = np.unique([x for y in neighbors for x in y])
-            thickness_shell_o3d = self.thickness_shell.as_open3d
-            thickness_shell_o3d.remove_vertices_by_index(neighbors)
-            self.thickness_shell = trimesh.Trimesh(thickness_shell_o3d.vertices, thickness_shell_o3d.triangles)
-            if self.test:
-                # mesh_inner_copy.export(f"{self.save_path}/mesh_inner_copy.stl")
-                self.thickness_shell.export(f"{self.save_path}/thickness_shell.stl")
+            if self.thickness_shell:
+                boundary = getBoundaryPoints(self.thickness_shell)[1]
+                neighbors = get_neighbors(boundary, 2, self.thickness_shell)
+                neighbors = np.unique([x for y in neighbors for x in y])
+                thickness_shell_o3d = self.thickness_shell.as_open3d
+                thickness_shell_o3d.remove_vertices_by_index(neighbors)
+                self.thickness_shell = trimesh.Trimesh(
+                    thickness_shell_o3d.vertices, thickness_shell_o3d.triangles
+                )
+                if self.test:
+                    self.thickness_shell.export(f"{self.save_path}/thickness_shell.stl")
+            else:
+                mesh_inner_copy = mesh_out.as_open3d.select_by_index(
+                    self.points_inner_id
+                )
+                mesh_inner_copy = trimesh.Trimesh(
+                    mesh_inner_copy.vertices, mesh_inner_copy.triangles
+                )
+                mesh_inner_copy.invert()
+                self.thickness_shell = get_thickness_gap(mesh_inner_copy)
+                if self.test:
+                    mesh_inner_copy.export(f"{self.save_path}/mesh_inner_copy.stl")
+                    self.thickness_shell.export(f"{self.save_path}/thickness_shell.stl")
         print("get thickness_shell end")
 
         self.mesh.update_mesh(mesh_out.vertices, mesh_out.faces)
@@ -3821,6 +3830,8 @@ class GenerateCrowns:
             self.add_point_normal = self.add_point_normal / np.linalg.norm(
                 self.add_point_normal, axis=1, keepdims=True
             )
+        import pymeshlab
+
         ms_mesh = pymeshlab.Mesh(self.mesh.vertices, self.mesh.faces)
         ms = pymeshlab.MeshSet()
         ms.add_mesh(ms_mesh)
@@ -3904,15 +3915,7 @@ class GenerateCrowns:
         self.pre_op_teeth = read_mesh_bytes(self.pre_op_teeth)
         if self.preop_or_mirror == "preop":
             post_op_crown = pre_op.std_morphing(self.std_crown, self.pre_op_crown)
-            # post_op_crown = pre_op.preop2post(
-            #     self.pre_op_teeth.as_open3d,
-            #     self.post_op_teeth.as_open3d,
-            #     pre_op_morph.as_open3d,
-            # )
             post_op_crown.apply_transform(self.preop_matrix)
-            # post_op_crown = trimesh.Trimesh(
-            #     post_op_crown.vertices, post_op_crown.triangles
-            # )
             return post_op_crown
         elif self.preop_or_mirror == "mirror":
             m_crown = mirror_crown.mirror_crown(
@@ -3922,28 +3925,21 @@ class GenerateCrowns:
                 self.ai_matrix,
                 self.std_crown,
                 self.mirror_id,
+                self.prep_tid
             )
             return m_crown
         else:
             return self.mesh
 
     def get_std_crown(self):
+        if self.test:
+            os.makedirs(self.save_path, exist_ok=True)
         self.read_mesh()
         print("read_mesh end")
 
         self.axis_y = self.mesh.cross_points.pt[0] - self.mesh.cross_points.pt[1]
 
         if self.multi_restoration:
-            # _, self.new_transform_list = transform_method(
-            #     self.mesh1,
-            #     self.mesh2,
-            #     self.mesh_beiya,
-            #     len(self.all_other_crowns),
-            #     self.miss_id,
-            #     self.is_single,
-            #     self.pt1,
-            #     self.pt2,
-            # )
             _, self.new_transform_list = transform_method_(
                 self.mesh_beiya,
                 self.all_other_crowns,
@@ -3997,22 +3993,15 @@ class GenerateCrowns:
         self.get_roi_from_upper_lower()
         print("get_roi_from_upper_lower end")
 
-        # self.get_purue_beiya()
-        # print("get_purue_beiya end")
-
-        # self.trans_y()
-        # print("trans_y end")
         self.trans_scale()
         if self.test:
             self.mesh.export(f"{self.save_path}/mesh_4.stl")
         print("trans_scale end")
-        # self.trans_p()
-        # if self.test:
-        #     self.mesh.export(f"{self.save_path}/mesh_5.stl")
-        # print("trans_p end")
-        self.mesh = self.pre_op_and_mirror()
+
+        self.mesh_ = self.pre_op_and_mirror()
         if self.test:
             self.mesh.export(f"{self.save_path}/std.stl")
+            self.mesh_.export(f"{self.save_path}/std_new.stl")
 
     def get_post_mesh(self):
         if self.test:
@@ -4023,7 +4012,24 @@ class GenerateCrowns:
         )
         self.load_points()
         if self.occ_id is not None:
-            self.mesh.add_keypoint("occ_id", self.occ_id)
+            if self.std_crown:
+                import pymeshlab
+
+                ms_mesh = pymeshlab.Mesh(self.mesh.vertices, self.mesh.faces)
+                ms = pymeshlab.MeshSet()
+                ms.add_mesh(ms_mesh)
+                ms.meshing_isotropic_explicit_remeshing()
+                self.mesh.update_mesh(
+                    ms.mesh(0).vertex_matrix(), ms.mesh(0).face_matrix()
+                )
+                self.std_crown = TrackedTrimesh(
+                    self.std_crown.vertices, self.std_crown.faces
+                )
+                self.std_crown.add_keypoint("occ_id", self.occ_id)
+                _, self.occ_id = find_new_points(self.mesh, self.std_crown.occ_id.pt, 1)
+                self.mesh.add_keypoint("occ_id", self.occ_id)
+            else:
+                self.mesh.add_keypoint("occ_id", self.occ_id)
         # self.load_config_new()
         # self.axis_y = self.mesh.cross_points.pt[0] - self.mesh.cross_points.pt[1]
         # self.get_adjacent_area()
@@ -4463,6 +4469,7 @@ def stdcrown(event):
         pre_op_crown=event.get("pre_op_crown"),
         # pre_op_teeth=event.get("pre_op_teeth"),
         mirror_id=event.get("mirror_id"),
+        prep_tid=event.get("prep_tid"),
         handler_name="std",
         test=event.get("test", False),
         save_path=event.get("save_path", None),
@@ -4486,9 +4493,9 @@ def post(event):
         points_oppo_id=event.get("points_oppo_id"),
         paras=event.get("paras"),
         fill_undercut=event.get("fill_undercut", False),
-        # mesh=read_mesh_bytes(event.get("standard")),
         occ_id=event.get("occ_id"),
         mesh=event.get("standard"),
+        std_crown=event.get("std_crown"),
         mesh_jaw=read_mesh_bytes(event.get("mesh_jaw")),
         mesh_oppo=read_mesh_bytes(event.get("mesh_oppo")),
         pre_tag=event.get("pre_tag"),

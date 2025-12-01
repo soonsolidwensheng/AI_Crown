@@ -179,14 +179,29 @@ def handler(event, context):
             inner.apply_transform(event["ai_matrix"])
             event["inner"] = write_mesh_bytes(inner)
 
-            standard, occ_id = decompress_drc(event["standard"])
-            standard.apply_transform(event["new_transform_list"][1])
-            standard.apply_transform(event["new_transform_list"][0])
-            standard.apply_transform(event["new_transform_list"][2])
-            standard.apply_transform(event["ai_matrix"])
-            event["standard"] = standard
-            event["occ_id"] = np.where(np.array(occ_id) == 1)[0]
-
+            if event.get("std_crown"):
+                std_crown, occ_id = decompress_drc(event["std_crown"])
+                std_crown.apply_transform(event["new_transform_list"][1])
+                std_crown.apply_transform(event["new_transform_list"][0])
+                std_crown.apply_transform(event["new_transform_list"][2])
+                std_crown.apply_transform(event["ai_matrix"])
+                event["std_crown"] = std_crown
+                event["occ_id"] = np.where(np.array(occ_id) == 1)[0]
+                standard, _ = decompress_drc(event["standard"])
+                standard.apply_transform(event["new_transform_list"][1])
+                standard.apply_transform(event["new_transform_list"][0])
+                standard.apply_transform(event["new_transform_list"][2])
+                standard.apply_transform(event["ai_matrix"])
+                event["standard"] = standard
+            else:
+                standard, occ_id = decompress_drc(event["standard"])
+                standard.apply_transform(event["new_transform_list"][1])
+                standard.apply_transform(event["new_transform_list"][0])
+                standard.apply_transform(event["new_transform_list"][2])
+                standard.apply_transform(event["ai_matrix"])
+                event["standard"] = standard
+                event["occ_id"] = np.where(np.array(occ_id) == 1)[0]
+            
 
             # standard, out_flags = decompress_drc(event["standard"])
             # standard.apply_transform(event["new_transform_list"][1])

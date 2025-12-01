@@ -8,7 +8,6 @@ import trimesh
 
 from crown_cpu import stdcrown
 
-
 def read_mesh_bytes(buffer):
     a = base64.b64decode(buffer)
     mesh_object = DracoPy.decode_buffer_to_mesh(a)
@@ -160,7 +159,7 @@ def get_kps_and_crowns(miss_id, kps_info, seg_crowns):
             for key in keys_6_7:
                 pt1.append(pt1_dic[key])
 
-    kps = {'arch':{'teeth_keypoints': {}}}
+    kps = {"arch": {"teeth_keypoints": {}}}
     all_other_crowns = {}
     for i in list(kps_info.keys()):
         keys = {}
@@ -180,7 +179,7 @@ def get_kps_and_crowns(miss_id, kps_info, seg_crowns):
         elif i[-1] in ["6", "7"]:
             for key in keys_6_7:
                 keys[key] = kps_info[i][key]
-        kps['arch']['teeth_keypoints'][i] = keys
+        kps["arch"]["teeth_keypoints"][i] = keys
 
         all_other_crowns[i] = seg_crowns.get(i)
     return kps, all_other_crowns, pt1, pt2
@@ -193,11 +192,17 @@ def handler(event, context=None):
         if input_info.get("multi_restoration"):
             input_info["ai_matrix"] = matrix2matrix(input_info["crown_rot"])
             kps_info = {}
-            for _, v in input_info["mesh_kps"].items():
-                kps_info = {**kps_info, **v["teeth_keypoints"]}
             seg_crowns = {}
-            for k, v in input_info["all_teeth_seg"].items():
-                seg_crowns = {**seg_crowns, **v["teeth_crowns"]}
+            if input_info["beiya_id"][0] in ["1", "2"]:
+                for _, v in input_info["mesh_kps"]["upper_arch"].items():
+                    kps_info = {**kps_info, **v}
+                for k, v in input_info["all_teeth_seg"]["upper_arch"].items():
+                    seg_crowns = {**seg_crowns, **v}
+            else:
+                for _, v in input_info["mesh_kps"]["lower_arch"].items():
+                    kps_info = {**kps_info, **v}
+                for k, v in input_info["all_teeth_seg"]["lower_arch"].items():
+                    seg_crowns = {**seg_crowns, **v}
             (
                 input_info["kps"],
                 input_info["all_other_crowns"],
@@ -215,6 +220,7 @@ def handler(event, context=None):
                 input_info["template_name"] = file_name2template_name(
                     input_info.get("pred_filestem_name")
                 )
+            input_info["prep_tid"] = [int(x) for x in input_info.get("prep_tid", [])]
 
         else:
             try:
@@ -381,7 +387,8 @@ def handler(event, context=None):
                 "cpu_colors_info": cpu_colors_info,
                 "points_oppo_id": points_oppo_id,
                 "rot_matrix": std_out.new_transform_list,
-                "ai_matrix": input_info["ai_matrix"].tolist()
+                "ai_matrix": input_info["ai_matrix"].tolist(),
+                "std_crown": input_info.get("std_crown"),
             }
         else:
             cpu_std_json = {
@@ -400,11 +407,18 @@ def handler(event, context=None):
             }
 
         if input_info.get("multi_restoration"):
-            std_out.mesh.apply_transform(np.linalg.pinv(input_info["ai_matrix"]))
-            std_out.mesh.apply_transform(np.linalg.pinv(std_out.new_transform_list[2]))
-            std_out.mesh.apply_transform(np.linalg.pinv(std_out.new_transform_list[0]))
-            std_out.mesh.apply_transform(np.linalg.pinv(std_out.new_transform_list[1]))
-            standard = write_mesh_bytes(std_out.mesh, colors)
+            if std_out.preop_or_mirror:
+                std_out.mesh_.apply_transform(np.linalg.pinv(input_info["ai_matrix"]))
+                std_out.mesh_.apply_transform(np.linalg.pinv(std_out.new_transform_list[2]))
+                std_out.mesh_.apply_transform(np.linalg.pinv(std_out.new_transform_list[0]))
+                std_out.mesh_.apply_transform(np.linalg.pinv(std_out.new_transform_list[1]))
+                standard = write_mesh_bytes(std_out.mesh_)
+            else:
+                std_out.mesh.apply_transform(np.linalg.pinv(input_info["ai_matrix"]))
+                std_out.mesh.apply_transform(np.linalg.pinv(std_out.new_transform_list[2]))
+                std_out.mesh.apply_transform(np.linalg.pinv(std_out.new_transform_list[0]))
+                std_out.mesh.apply_transform(np.linalg.pinv(std_out.new_transform_list[1]))
+                standard = write_mesh_bytes(std_out.mesh, colors)
 
             std_out.mesh_beiya.apply_transform(np.linalg.pinv(input_info["ai_matrix"]))
             std_out.mesh_beiya.apply_transform(
@@ -476,20 +490,12 @@ if __name__ == "__main__":
     #                     error_list.append(case)
     #             # break
     #     # break
-    # with open(os.path.join(path, dir, "error_list.txt"), "w") as f:
-    #     f.write("\n".join(error_list))
-    with open(
-        "test_data_/muti_crown/dev/0820/crown_standard.json",
-        "r",
-    ) as f:
-        data = json.load(f)
-    # data["multi_restoration"] = True
-    # data["beiya_id"] = "14"
 
-    # for k, v in data["crown_res"][data["beiya_id"]].items():
-    #     data[k] = v
-    data['test'] = True
-    data['save_path'] = r'test_data_/muti_crown/dev/0820/std'
+    with open("/home/wanglong/下载/data/24/crown_standard.json", "r") as f:
+        data = json.load(f)
+
+    data["test"] = True
+    data["save_path"] = r"/home/wanglong/下载/data/24/out"
     out = handler(data, "")
-    with open('test_data_/muti_crown/dev/std.json', 'w') as f:
+    with open("/home/wanglong/下载/data/24/std.json", "w") as f:
         f.write(json.dumps(out["Msg"]["data"]))

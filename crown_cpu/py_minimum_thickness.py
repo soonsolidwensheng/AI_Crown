@@ -749,14 +749,45 @@ class InlayAdjust:
                         # break
             if bBreak:
                 break
-                
        
         bpy.ops.mesh.select_mode(type='FACE')        
-        bpy.ops.mesh.select_all(action='DESELECT')        
-        for i in range(0,500):
-            print( i )
+        bpy.ops.mesh.select_all(action='DESELECT')   
+        # ouber_bvh = mathutils.bvhtree.BVHTree.FromBMesh(outer_bm)
+        
+        for c in range(0,500):
+            print( c )
+            ouber_bvh = mathutils.bvhtree.BVHTree.FromBMesh(outer_bm)
+            max_dist = 0.0
+            max_f = -1
+            to_pos = mathutils.Vector((0,0,0))
+            for i in shell_bm.verts:
+                if i.is_boundary:
+                    
+                    
+                    loc, normal, idx, dist = ouber_bvh.find_nearest(i.co)
+                    
+                    dir = i.co - loc
+                    #dir.normalize()
+                    result = ouber_bvh.ray_cast(i.co, dir)
+                    if result[0] == None:
+                        #debug_view.drawLine(loc, i.co )
+                        if dist > max_dist:
+                            max_dist = dist
+                            max_f = idx
+                            to_pos = dir
+            if max_f == -1:
+                break
+            if max_f >= 0:
+                outer_bm.faces[max_f].select_set(True)     
+                bpy.ops.transform.translate(value=to_pos, orient_type='GLOBAL', mirror=False, use_proportional_edit=True, proportional_edit_falloff='SMOOTH', proportional_size=2, use_proportional_connected=True, use_proportional_projected=False, release_confirm=True)
+                outer_bm.faces[max_f].select_set(False)     
+                
+                
+                    #outer_bm.faces[idx].select_set(True)
+        for i in range(0,50):
             bBreak = True
             ouber_bvh = mathutils.bvhtree.BVHTree.FromBMesh(outer_bm)
+            
             for f in outer_bm.faces:
                
                 origin = f.calc_center_median()
@@ -765,21 +796,20 @@ class InlayAdjust:
                
                 loc2, nor2, idx2, dist2 = ouber_bvh.ray_cast( origin, direction )
                 if loc != None and loc2 == None:
-                   
-
+                    bBreak = False
                     f.select_set(True)
                     
-  
-                    bpy.ops.transform.translate(value=(0.0, 0.0, dist+0.1), orient_type='NORMAL', mirror=False, use_proportional_edit=True, proportional_edit_falloff='SMOOTH', proportional_size=2, use_proportional_connected=True, use_proportional_projected=False, release_confirm=True)
+                    
+                    bpy.ops.transform.translate(value=(0,0,dist+0.1), orient_type='NORMAL', mirror=False, use_proportional_edit=True, proportional_edit_falloff='SMOOTH', proportional_size=2, use_proportional_connected=True, use_proportional_projected=False, release_confirm=True)
     
                     
                     f.select_set(False)
                      
                             
-               
+                
             if bBreak:
                 break                
-                 
+         
         for i in range(0,1):
             #bpy.ops.mesh.select_all(action='DESELECT')
 
@@ -1592,3 +1622,4 @@ if __name__ == '__main__':
         inlayAdjust_obj = InlayAdjust(inlayObj, crownObj)
 
         inlayAdjust_obj.check()
+        
