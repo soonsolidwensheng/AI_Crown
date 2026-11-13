@@ -2,7 +2,7 @@
 # Define custom function directory
 FROM python:3.8.18 AS build-image
 ARG FUNCTION_DIR="/function"
-# ARG WORK_DIR="/crown_cpu"
+ARG WORK_DIR="/crown_cpu"
 # 使用基础镜像
 # Include global arg in this stage of the build
 ARG FUNCTION_DIR
@@ -22,10 +22,10 @@ RUN apt-get update && apt-get install -y\
     libgl1-mesa-glx \
     && rm -rf /var/lib/apt/lists/*
 
-RUN mv ${FUNCTION_DIR}/remesh.py /usr/local/lib/python3.8/site-packages/trimesh/remesh.py
+RUN mv ${FUNCTION_DIR}/${WORK_DIR}/remesh.py /usr/local/lib/python3.8/site-packages/trimesh/remesh.py
 # Set working directory to function root directory
-WORKDIR ${FUNCTION_DIR}
-ENV LD_LIBRARY_PATH=${FUNCTION_DIR}
+WORKDIR ${FUNCTION_DIR}/${WORK_DIR}
+ENV LD_LIBRARY_PATH=${FUNCTION_DIR}/${WORK_DIR}
 
 EXPOSE 9999
 CMD [ "python deploy.py" ]
