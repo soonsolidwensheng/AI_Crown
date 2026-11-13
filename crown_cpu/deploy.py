@@ -1,15 +1,10 @@
 from flask import Flask, request
-from stdcrown import handler as std_handler
 from register_preop_to_postop import handler as reg_handler
 
 app = Flask(__name__)
 app.config["JSON_SORT_KEYS"] = False
 
 
-@app.route("/std_process", methods=["POST"])
-def std_process_handler():
-    event = request.json
-    return std_handler(event, "")
 
 
 @app.route("/register-preop_to_postop", methods=["POST"])
