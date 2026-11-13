@@ -1,12 +1,178 @@
+# 26年7月20日更新
+
+`postprocess` 接口的 `get_purue_beiya()`（备牙邻牙边缘处理）中的 `pypruners.pruner` 替换为 CutMeshPython 的轮廓切割算法（`segment_by_contour`）。新增 2 个可选输入参数：
+
+- `control_pts_front`：`(N,3)` 点数组，备牙边缘轮廓坐标。传入时启用新版切割：CutMeshPython 沿此轮廓切割 `mesh_jaw`，自动选取顶点数最接近原 `mesh_beiya` 的连通体作为新的 `mesh_beiya`。**不传或传空则跳过切割**，直接使用传入的 `mesh_beiya`（与旧版行为一致）。切割失败时打印警告日志并回退使用原始传入的 `mesh_beiya`。
+- `cement_gap`：float，默认 `0.12`。粘结剂缝隙大小（mm），从原来的固定默认值改为顶层可配置参数，覆盖 `paras` 内的同名参数。
+
+## postprocess / stitch_edge
+
+两个接口均支持，新增输入参数相同：
+
+```json
+{
+    // ...之前的参数
+    "control_pts_front": "array",     // 可选，(N,3)备牙边缘轮廓点。传入时启用CutMeshPython轮廓切割，不传、null或空数组时跳过切割
+    "cement_gap": "float",            // 可选，默认0.12。粘结剂缝隙大小（mm），覆盖paras内的同名参数
+}
+```
+
+> 注意：`undercut_filling` 接口已废弃，不再使用。
+
+# 26年7月14日更新
+
+取消7月13日新增的 `margin-align-algorithm-v1` 和 `stitch-algorithm-v-1` 两个 Feature Flag，改为直接固定使用当时 flag=true 对应的新算法，不再需要任何输入参数控制：
+
+- `postprocess` 接口的 trans_neck()：统一使用测地距离环形过渡带变形+咬合面锚点保护算法（旧版简单TPS对齐算法已删除）
+- `postprocess`/`stitch_edge` 接口 fill_gap() 内的 occ_id 重算：统一使用测地距离扩张+边界收缩算法（旧版拓扑邻居扩张逻辑已删除）
+
+`margin-align-algorithm-v1` 和 `stitch-algorithm-v-1` 这两个字段不再生效，传了会被忽略。
+
+# 26年7月13日更新
+
+新增2个 Feature Flag，均默认关闭（不传或传 `false` 时行为与之前完全一致），用于灰度验证margin对齐和咬合区域重算的新算法：
+
+- `margin-align-algorithm-v1`：**仅在 `postprocess` 接口生效**（对应 trans_neck()，只在生成外冠后的margin对齐阶段调用一次，`stitch_edge` 接口不会读取这个字段）
+- `stitch-algorithm-v-1`：**在 `postprocess` 和 `stitch_edge` 两个接口都生效**（对应 fill_gap() 内部的咬合区域(occ_id)重算逻辑，这两个接口都会调用 fill_gap()）
+
+## postprocess
+
+**输入Input**：
+
+```json
+{
+    // ...之前的参数
+    "margin-align-algorithm-v1": "bool", // 可选，默认false，仅postprocess接口支持。true时启用新版trans_neck()：基于测地距离的环形过渡带变形，并保护咬合面锚点不被移动；false时沿用重构前的简单TPS对齐算法
+    "stitch-algorithm-v-1": "bool", // 可选，默认false。true时启用新版咬合区域(occ_id)重算逻辑：基于测地距离扩张后再收缩边界一圈；false时沿用原有的拓扑邻居扩张逻辑
+}
+```
+
+## stitch_edge
+
+**输入Input**：
+
+```json
+{
+    // ...之前的参数
+    "stitch-algorithm-v-1": "bool", // 可选，默认false，含义同上（stitch_edge接口不支持margin-align-algorithm-v1，该flag只在postprocess生效）
+}
+```
+
+> 以上2个 flag 已于7月14日取消，详见上方最新更新。
+
+# 26年7月7日更新
+
+1、重构 trans_neck()（备牙边缘对齐算法）：引入测地距离工具函数，在 neck 边缘与咬合面之间构建环形分层过渡带，通过 falloff 加权位移实现自适应变形，同时保护咬合面锚点不受影响。（此算法目前需通过上方的 `margin-align-algorithm-v1` flag 显式开启，默认仍为重构前的旧算法）
+2、修复 stitch_() 缝合函数在首轮迭代和边界闭合上的边界条件bug，避免生成重复三角形。
+
+
+# 26年6月2日更新
+
+1、镜像流程（preop_or_mirror 为 mirror 时）新增补洞修复：在等距重网格化后调用 `meshing_close_holes()`。
+2、针对镜像/术前流程（preop_or_mirror 不为空时）对外冠面片新增remesh步骤：非流形边清理、退化三角形/重复顶点清理后，调用 pymeshlab 的等距显式重网格化。
+3、外冠面片输出前新增清理逻辑（remove_degenerate_faces 等），减少下游算法处理脏面片的问题。
+
+# 26年6月1日更新
+
+1、修复厚度调整算法（py_minimum_thickness.py）中 Blender 网格转换函数 convertMesh 的重复点问题，改为直接用 `mesh.from_pydata` 构建网格，避免旧版 bmesh 转换流程产生的伪影。
+2、外冠面片清理逻辑调整。
+
+# 26年5月26日更新
+
+1、新增非流形网格清理函数 clean_non_manifold_mesh，统一处理重复顶点/三角形、退化三角形、非流形边和非流形顶点，增强网格处理的鲁棒性。
+2、get_biggest_mesh 和 slice_mesh 流程新增空网格保护：当输入网格为空、无连通分量、或裁剪/pruner 后结果为空时抛出明确异常，而非静默出错。
+
+# 26年5月18日更新
+
+1、新增安全合并近点算法（safe_merge_close_vertices.py），替换原有的全局近点合并逻辑：合并前检查边界缓冲区（boundary_buffer）和法向夹角阈值（normal_angle_deg），避免跨薄壁、跨折角或跨边界误合并。merge_close_vertices() 内部改为调用该实现。
+2、修复镜像流程中 adjust_crown_position()（牙冠与邻牙位置调整）的缩放参数计算错误：多处硬编码的缩放偏移量不一致，统一改为可配置的偏移变量。
+3、postprocess.py / stitch_edge.py 内部重构：提取"多重修复逆变换"逻辑（_apply_multi_restoration_inverse_transforms）和 crown 压缩逻辑为独立函数，消除重复代码，接口行为不变。
+
+# 26年5月12日更新
+以下接口均已兼容 `source_url` 和 `target_url`：
+
+- `crown_cpu/stdcrown.py`
+- `crown_cpu/postprocess.py`
+- `crown_cpu/stitch_edge.py`
+- `crown_cpu/register_preop_to_postop.py`
+
+调用方式说明：
+
+- 可直接传完整 payload
+- 也可只传外层控制字段
+- `source_url`：先下载真实输入 JSON
+- `target_url`：处理完成后自动上传结果
+- 不传 `target_url`：继续直接返回本地结果
+
+```json
+{
+    "...": "...",
+    "source_url": "https://xxx.com/xxx/xxx/input.json",
+    "target_url": "https://xxx.com/xxx/xxx/output.json"
+}
+```
+
+# 26年5月11日更新
+crown_cpu/postprocess.py中增加参数：兼容`source_url`和`target_url`，如果有这两个参数，直接从url获取输入
+```json
+{
+    "...": "...",
+    "source_url": "https://xxx.com/xxx/xxx/xxx.json",
+    "target_url": "https://xxx.com/xxx/xxx/xxx.json",
+}
+```
+
+# 26年5月9日更新
+crown_cpu/stdcrown.py中增加参数：兼容`source_url`和`target_url`，如果有这两个参数，直接从url获取输入
+```json
+{
+    "...": "...",
+    "source_url": "https://xxx.com/xxx/xxx/xxx.json",
+    "target_url": "https://xxx.com/xxx/xxx/xxx.json",
+}
+```
+
+# 26年3月10日更新
+crown_cpu/test_data中更新测试数据，crown_post.json用于测试post接口，crown_standard.json用于测试stdcrown接口
+
+
+# 26年2月3日更新
+post接口新增3个输出
+```json
+{   
+    // ...之前的参数
+    "collides_with_antagonist": "bool",  // 最小厚度外壳是否与对颌碰撞
+    "collides_with_adjacent": "bool",    // 最小厚度外壳是否与邻牙碰撞
+}
+```
+
+# 26年1月4日更新
+post接口新增1个输出
+```json
+{   
+    // ...之前的参数
+    "warning_info": "bool",  // 镜像流程中是否触发报警
+}
+```
+
 # 25年11月6日更新
 新增register_preop_to_postop接口，在术前流程中得到术前模型匹配术后模型的旋转矩阵，参数如下
 
-**输如**
+**输入**
 
 ```json
 {   
     "preop_teeth": "dict",  // 术前模型的牙齿分割结果(包括上下颌所有牙齿)
     "postop_teeth": "dict", // 术后模型的牙齿分割结果(包括上下颌所有牙齿)
+}
+```
+
+该接口当前也支持 URL 方式调用：
+
+```json
+{
+    "source_url": "https://xxx.com/xxx/xxx/input.json",
+    "target_url": "https://xxx.com/xxx/xxx/output.json"
 }
 ```
 

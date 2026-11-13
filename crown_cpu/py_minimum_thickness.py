@@ -411,7 +411,30 @@ def findNearFaceByPoints(points, bm, inlayObj, p_size=1.0 ):
 #debug_view.close()   
 
 
+
+
 def convertMesh(name, verts, faces):
+
+    mesh = bpy.data.meshes.new(name)
+
+    mesh.from_pydata(
+        [tuple(v) for v in verts],   # vertices
+        [],                          # edges
+        [list(f) for f in faces]     # faces
+    )
+
+    mesh.validate()
+    mesh.update()
+
+    obj = bpy.data.objects.new(name, mesh)
+    bpy.context.collection.objects.link(obj)
+
+    bpy.context.view_layer.objects.active = obj
+    obj.select_set(True)
+
+    return True
+
+def convertMesh_old(name, verts, faces):
     mesh = bpy.data.meshes.new(name=name)
     bm = bmesh.new()
     bResult = True
@@ -434,6 +457,10 @@ def convertMesh(name, verts, faces):
     
     from bpy_extras import object_utils
     object_utils.object_data_add( bpy.context, mesh )
+    bpy.ops.object.editmode_toggle()
+    bpy.ops.mesh.select_all(action='SELECT')
+    bpy.ops.mesh.remove_doubles()
+    bpy.ops.object.editmode_toggle()
     bpy.context.active_object.name = name
     return bResult
 
@@ -1509,7 +1536,7 @@ def crownAdaptive(thinkness, crown_verts, crown_faces, inlay_verts, inlay_faces,
     inlayObj, crownObj = to_objects( crown_verts, crown_faces, inlay_verts, inlay_faces )
  
     ####################################### SAVE
-    #bpy.ops.wm.save_as_mainfile(filepath='/mnt/d/ok.blend')
+    # bpy.ops.wm.save_as_mainfile(filepath='./ok.blend')
 
     inlayAdjust_obj = InlayAdjust(inlayObj, crownObj)    
     

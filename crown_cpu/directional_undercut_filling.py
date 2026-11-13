@@ -391,7 +391,7 @@ def filling_undercut(mesh, undercut_direction, save_path=None, display=False):
         vis_list1 += [blocking_pc, intersection_pc]
         o3d.visualization.draw_geometries(vis_list1)
     
-    if len(blocking_vertices) > 0:
+    if len(blocking_vertices) > 0 and len(intersection_vertices) > 0:
     # 聚类寻找簇原点
         blocking_pc = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(np.array(blocking_vertices)))
         intersection_pc = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(np.array(intersection_vertices)))

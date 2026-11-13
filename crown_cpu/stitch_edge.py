@@ -1,12 +1,18 @@
 import base64
 import json
 import traceback
+import requests
 
 import DracoPy
 import MQCompressPy
 import numpy as np
 import trimesh
 
+from input_compat import (
+    load_input_info,
+    merge_missing_fields,
+    upload_result,
+)
 from crown_cpu import stitch_edge
 
 
@@ -86,138 +92,122 @@ def matrix2matrix(crown_rot_matirx):
     ai_matrix[:, 3] = [0, 0, 0, 1]
     return ai_matrix
 
+def _transform_points(points, matrices, ai_matrix):
+    """对 (N,3) 点集应用 multi_restoration 坐标变换链。
+    
+    变换顺序与 mesh 变换一致: matrices[1] · [0] · [2] · ai_matrix
+    """
+    pts = np.asarray(points, dtype=np.float64)
+    pts_h = np.concatenate([pts, np.ones((len(pts), 1))], axis=1)
+    for idx in (1, 0, 2):
+        pts_h = (matrices[idx] @ pts_h.T).T
+    pts_h = (ai_matrix @ pts_h.T).T
+    return pts_h[:, :3].tolist()
 
-def file_name2template_name(file_name):
-    s = file_name.split("_")[0]
-    f2t = {
-        "CSv1": "Cyber Standard v1",
-        "GSv1": "Generic Standard v1",
-        "Mv1": "Mature v1",
-        "rev1": "st_tooth",
-        "SSv1": "Soft Standard v1",
-        "Yv1": "Youth v1",
-    }
-    return f2t[s]
+STITCH_EDGE_PARAS_WHITELIST = {
+    "align_edges",
+    "undercut_filled",
+    "fill_undercut",
+    "margin_width",
+    "cement_gap",
+    "height_of_minimal_gap",
+    "height_of_minimal_gap2",
+    "minimal_gap",
+}
+
+
+def _normalize_stitch_edge_input(event):
+    """归一化 stitch_edge 入口的公共兼容字段。"""
+    normalized = dict(event)
+
+    if normalized.get("cpu_info_json") is not None:
+        normalized = merge_missing_fields(normalized, normalized["cpu_info_json"])
+
+    if isinstance(normalized.get("paras"), dict):
+        normalized["paras"] = {
+            key: value
+            for key, value in normalized["paras"].items()
+            if key in STITCH_EDGE_PARAS_WHITELIST
+        }
+        for key in ("align_edges", "fill_undercut"):
+            if normalized["paras"].get(key) is not None:
+                normalized[key] = normalized["paras"][key]
+
+    return normalized
+
+
+def _apply_multi_restoration_inverse_transforms(mesh, input_info):
+    mesh.apply_transform(np.linalg.pinv(input_info["ai_matrix"]))
+    mesh.apply_transform(np.linalg.pinv(input_info["new_transform_list"][2]))
+    mesh.apply_transform(np.linalg.pinv(input_info["new_transform_list"][0]))
+    mesh.apply_transform(np.linalg.pinv(input_info["new_transform_list"][1]))
+
+
+def _compress_stitch_crown(stitch_out):
+    points_id = [
+        stitch_out.points_inner_id,
+        stitch_out.points_edge_outer_id,
+        stitch_out.points_edge_inner_id,
+    ]
+    if len(stitch_out.occ_id):
+        points_id.append(stitch_out.mesh.occ_id.idx)
+    return compress_drc(stitch_out.mesh, points_id)
 
 
 def handler(event, context):
     print("receive case")
     try:
+        input_info = load_input_info(event, requests)
         print("start AI_Crown_Stitch_Edge ..")
+        input_info = _normalize_stitch_edge_input(input_info)
 
         cpu_input_json = {
-            "inner": event.get("inner"),
-            "out": event.get("out"),
-            "align_edges": event.get("align_edges"),
+            "inner": input_info.get("inner"),
+            "out": input_info.get("out"),
+            "align_edges": input_info.get("align_edges"),
         }
-        if "cpu_info_json" in event.keys():
-            for k, v in event["cpu_info_json"].items():
-                if k not in event.keys():
-                    event[k] = v
-        else:
-            pass
-        print("pred_filestem_name", event.get("pred_filestem_name"))
-        if event.get("pred_filestem_name"):
-            event["template_name"] = file_name2template_name(
-                event.get("pred_filestem_name")
-            )
-        print("template_name", event.get("template_name"))
-        print("job_id", event.get("job_id"))
-        if event.get("multi_restoration"):
-            event["new_transform_list"] = event["rot_matrix"]
-            inner = read_mesh_bytes(event["inner"])
-            inner.apply_transform(event["new_transform_list"][1])
-            inner.apply_transform(event["new_transform_list"][0])
-            inner.apply_transform(event["new_transform_list"][2])
-            inner.apply_transform(event["ai_matrix"])
-            event["inner"] = write_mesh_bytes(inner)
+        print("job_id", input_info.get("job_id"))
+        if input_info.get("multi_restoration"):
+            input_info["new_transform_list"] = input_info["rot_matrix"]
+            inner = read_mesh_bytes(input_info["inner"])
+            inner.apply_transform(input_info["new_transform_list"][1])
+            inner.apply_transform(input_info["new_transform_list"][0])
+            inner.apply_transform(input_info["new_transform_list"][2])
+            inner.apply_transform(input_info["ai_matrix"])
+            input_info["inner"] = write_mesh_bytes(inner)
 
-            # out, occ_id = decompress_drc(event["out"])
-            out, occ_id = read_mesh_bytes_unit16(event["out"])
-            out.apply_transform(event["new_transform_list"][1])
-            out.apply_transform(event["new_transform_list"][0])
-            out.apply_transform(event["new_transform_list"][2])
-            out.apply_transform(event["ai_matrix"])
-            event["out"] = out
-            event["occ_id"] = np.where(np.array(occ_id) == 4)[0]
+            # out, occ_id = decompress_drc(input_info["out"])
+            out, occ_id = read_mesh_bytes_unit16(input_info["out"])
+            out.apply_transform(input_info["new_transform_list"][1])
+            out.apply_transform(input_info["new_transform_list"][0])
+            out.apply_transform(input_info["new_transform_list"][2])
+            out.apply_transform(input_info["ai_matrix"])
+            input_info["out"] = out
+            input_info["occ_id"] = np.where(np.array(occ_id) == 4)[0]
 
-        stitch_out = stitch_edge(event)
-        if len(stitch_out.occ_id):
-            crown = compress_drc(
-                stitch_out.mesh,
-                [
-                    stitch_out.points_inner_id,
-                    stitch_out.points_edge_outer_id,
-                    stitch_out.points_edge_inner_id,
-                    stitch_out.mesh.occ_id.idx
-                ],
-            )
-        else:
-            crown = compress_drc(
-                stitch_out.mesh,
-                [
-                    stitch_out.points_inner_id,
-                    stitch_out.points_edge_outer_id,
-                    stitch_out.points_edge_inner_id,
-                ],
-            )
+            if input_info.get("control_pts_front"):
+                input_info["control_pts_front"] = _transform_points(
+                    input_info["control_pts_front"],
+                    input_info["new_transform_list"],
+                    input_info["ai_matrix"],
+                )
+
+        stitch_out = stitch_edge(input_info)
+        crown = _compress_stitch_crown(stitch_out)
         inner = write_mesh_bytes(stitch_out.mesh_beiya)
         thickness_shell = write_mesh_bytes(stitch_out.thickness_shell)
 
-        if event.get("multi_restoration"):
-            stitch_out.mesh.apply_transform(np.linalg.pinv(event["ai_matrix"]))
-            stitch_out.mesh.apply_transform(
-                np.linalg.pinv(event["new_transform_list"][2])
-            )
-            stitch_out.mesh.apply_transform(
-                np.linalg.pinv(event["new_transform_list"][0])
-            )
-            stitch_out.mesh.apply_transform(
-                np.linalg.pinv(event["new_transform_list"][1])
-            )
-            if len(stitch_out.occ_id):
-                crown = compress_drc(
-                    stitch_out.mesh,
-                    [
-                        stitch_out.points_inner_id,
-                        stitch_out.points_edge_outer_id,
-                        stitch_out.points_edge_inner_id,
-                        stitch_out.mesh.occ_id.idx
-                    ],
-                )
-            else:
-                crown = compress_drc(
-                    stitch_out.mesh,
-                    [
-                        stitch_out.points_inner_id,
-                        stitch_out.points_edge_outer_id,
-                        stitch_out.points_edge_inner_id,
-                    ],
-                )
+        if input_info.get("multi_restoration"):
+            _apply_multi_restoration_inverse_transforms(stitch_out.mesh, input_info)
+            crown = _compress_stitch_crown(stitch_out)
 
-            stitch_out.mesh_beiya.apply_transform(np.linalg.pinv(event["ai_matrix"]))
-            stitch_out.mesh_beiya.apply_transform(
-                np.linalg.pinv(event["new_transform_list"][2])
-            )
-            stitch_out.mesh_beiya.apply_transform(
-                np.linalg.pinv(event["new_transform_list"][0])
-            )
-            stitch_out.mesh_beiya.apply_transform(
-                np.linalg.pinv(event["new_transform_list"][1])
+            _apply_multi_restoration_inverse_transforms(
+                stitch_out.mesh_beiya, input_info
             )
             inner = compress_drc(stitch_out.mesh_beiya)
 
-            stitch_out.thickness_shell.apply_transform(
-                np.linalg.pinv(event["ai_matrix"])
-            )
-            stitch_out.thickness_shell.apply_transform(
-                np.linalg.pinv(event["new_transform_list"][2])
-            )
-            stitch_out.thickness_shell.apply_transform(
-                np.linalg.pinv(event["new_transform_list"][0])
-            )
-            stitch_out.thickness_shell.apply_transform(
-                np.linalg.pinv(event["new_transform_list"][1])
+            _apply_multi_restoration_inverse_transforms(
+                stitch_out.thickness_shell, input_info
             )
             thickness_shell = compress_drc(stitch_out.thickness_shell)
 
@@ -230,6 +220,13 @@ def handler(event, context):
             "thick_shell_hit": stitch_out.colloision
         }
         print("suncess stitch_edge")
+
+        if event.get("target_url"):
+            upload_response = upload_result(
+                event.get("target_url"), stitch_json, requests
+            )
+            print(upload_response.status_code)
+            return {"Msg": {"data": "result saved to target url"}, "Code": 200, "State": "Success"}
 
         return {"Msg": {"data": stitch_json}, "Code": 200, "State": "Success"}
     except Exception as _:

@@ -2,12 +2,18 @@ import base64
 import copy
 import json
 import traceback
-
+import requests
 import DracoPy
 import MQCompressPy
 import numpy as np
 import trimesh
 
+from input_compat import (
+    file_name2template_name,
+    load_input_info,
+    merge_missing_fields,
+    upload_result,
+)
 from crown_cpu import post
 
 
@@ -127,119 +133,165 @@ def dict_np2list(data):
     return d
 
 
-def file_name2template_name(file_name):
-    s = file_name.split("_")[0]
-    f2t = {
-        "CSv1": "Cyber Standard v1",
-        "GSv1": "Generic Standard v1",
-        "Mv1": "Mature v1",
-        "rev1": "st_tooth",
-        "SSv1": "Soft Standard v1",
-        "Yv1": "Youth v1",
+def _transform_points(points, matrices, ai_matrix):
+    """对 (N,3) 点集应用 multi_restoration 坐标变换链。
+    
+    变换顺序与 mesh 变换一致: matrices[1] · [0] · [2] · ai_matrix
+    """
+    pts = np.asarray(points, dtype=np.float64)
+    pts_h = np.concatenate([pts, np.ones((len(pts), 1))], axis=1)
+    for idx in (1, 0, 2):
+        pts_h = (matrices[idx] @ pts_h.T).T
+    pts_h = (ai_matrix @ pts_h.T).T
+    return pts_h[:, :3].tolist()
+
+
+POSTPROCESS_PARAS_WHITELIST = {
+    "adjust_crown",
+    "undercut_filled",
+    "fill_undercut",
+    "minimal_thickness",
+    "margin_width",
+    "cement_gap",
+    "height_of_minimal_gap",
+    "height_of_minimal_gap2",
+    "minimal_gap",
+    "ad_gap",
+    "occlusal_distance",
+    "prox_or_occlu",
+    "local",
+}
+
+
+def _normalize_postprocess_input(event):
+    """归一化 postprocess 入口的公共兼容字段。"""
+    normalized = dict(event)
+
+    if normalized.get("pred_filestem_name"):
+        normalized["template_name"] = file_name2template_name(
+            normalized.get("pred_filestem_name")
+        )
+
+    if normalized.get("cpu_undercut_json") is not None:
+        normalized = merge_missing_fields(normalized, normalized["cpu_undercut_json"])
+        normalized["pre_tag"] = "undercut"
+    elif normalized.get("cpu_std_json") is not None:
+        normalized = merge_missing_fields(normalized, normalized["cpu_std_json"])
+        normalized["pre_tag"] = "std"
+
+    if isinstance(normalized.get("paras"), dict):
+        normalized["paras"] = {
+            key: value
+            for key, value in normalized["paras"].items()
+            if key in POSTPROCESS_PARAS_WHITELIST
+        }
+
+    return normalized
+
+
+def _apply_multi_restoration_inverse_transforms(mesh, input_info):
+    mesh.apply_transform(np.linalg.pinv(input_info["ai_matrix"]))
+    mesh.apply_transform(np.linalg.pinv(input_info["new_transform_list"][2]))
+    mesh.apply_transform(np.linalg.pinv(input_info["new_transform_list"][0]))
+    mesh.apply_transform(np.linalg.pinv(input_info["new_transform_list"][1]))
+
+
+def _compress_postprocess_crown(post_out):
+    points_id = [
+        post_out.points_inner_id,
+        post_out.points_edge_outer_id,
+        post_out.points_edge_inner_id,
+    ]
+    if post_out.occ_id is not None:
+        points_id.append(post_out.mesh.occ_id.idx)
+    return compress_drc(post_out.mesh, points_id)
+
+
+def _build_postprocess_cpu_info_json(
+    post_out, input_info, closer, further, cpu_points_info, axis, template_name
+):
+    cpu_info_json = {
+        "mesh_oppo": compress_drc(post_out.mesh_oppo),
+        "closer": closer,
+        "further": further,
+        "beiya_id": post_out.miss_id,
+        "is_single": post_out.is_single,
+        "cpu_points_info": cpu_points_info,
+        "axis": axis,
+        "template_name": template_name,
     }
-    return f2t[s]
+    if input_info.get("multi_restoration"):
+        cpu_info_json.update(
+            {
+                "mesh_jaw": compress_drc(post_out.mesh_jaw),
+                "rot_matrix": input_info["new_transform_list"],
+                "ai_matrix": input_info["ai_matrix"],
+            }
+        )
+    return cpu_info_json
 
 
 def handler(event, context):
     print("receive case")
+    # event["new_placement"] = True
     try:
+        input_info = load_input_info(event, requests)
         print("start AI_Crown_Post ..")
+        input_info = _normalize_postprocess_input(input_info)
 
-        print("pred_filestem_name", event.get("pred_filestem_name"))
-        if event.get("pred_filestem_name"):
-            event["template_name"] = file_name2template_name(
-                event.get("pred_filestem_name")
-            )
+        print("pred_filestem_name", input_info.get("pred_filestem_name"))
         cpu_input_json = {
-            "inner": event.get("inner"),
-            "standard": event.get("standard"),
-            "paras": event.get("paras"),
-            "crown_rot_matirx": event.get("crown_rot_matirx"),
-            "template_name": event.get("template_name", "st_tooth"),
-            "points_info": event.get("points_info"),
+            "inner": input_info.get("inner"),
+            "standard": input_info.get("standard"),
+            "paras": input_info.get("paras"),
+            "crown_rot_matirx": input_info.get("crown_rot_matirx"),
+            "template_name": input_info.get("template_name", "st_tooth"),
+            "points_info": input_info.get("points_info"),
         }
-        if "cpu_undercut_json" in event.keys():
-            for k, v in event["cpu_undercut_json"].items():
-                if k not in event.keys():
-                    event[k] = v
-            event["pre_tag"] = "undercut"
-        elif "cpu_std_json" in event.keys():
-            for k, v in event["cpu_std_json"].items():
-                if k not in event.keys():
-                    event[k] = v
-            event["pre_tag"] = "std"
-        print("template_name", event.get("template_name"))
-        print("job_id", event.get("job_id"))
-        if event.get("multi_restoration"):
-            event["new_transform_list"] = event["rot_matrix"]
-            inner = read_mesh_bytes(event["inner"])
-            inner.apply_transform(event["new_transform_list"][1])
-            inner.apply_transform(event["new_transform_list"][0])
-            inner.apply_transform(event["new_transform_list"][2])
-            inner.apply_transform(event["ai_matrix"])
-            event["inner"] = write_mesh_bytes(inner)
+        print("template_name", input_info.get("template_name"))
+        print("job_id", input_info.get("job_id"))
+        if input_info.get("multi_restoration"):
+            input_info["new_transform_list"] = input_info["rot_matrix"]
+            inner = read_mesh_bytes(input_info["inner"])
+            inner.apply_transform(input_info["new_transform_list"][1])
+            inner.apply_transform(input_info["new_transform_list"][0])
+            inner.apply_transform(input_info["new_transform_list"][2])
+            inner.apply_transform(input_info["ai_matrix"])
+            input_info["inner"] = write_mesh_bytes(inner)
 
-            if event.get("std_crown"):
-                std_crown, occ_id = decompress_drc(event["std_crown"])
-                std_crown.apply_transform(event["new_transform_list"][1])
-                std_crown.apply_transform(event["new_transform_list"][0])
-                std_crown.apply_transform(event["new_transform_list"][2])
-                std_crown.apply_transform(event["ai_matrix"])
-                event["std_crown"] = std_crown
-                event["occ_id"] = np.where(np.array(occ_id) == 1)[0]
-                standard, _ = decompress_drc(event["standard"])
-                standard.apply_transform(event["new_transform_list"][1])
-                standard.apply_transform(event["new_transform_list"][0])
-                standard.apply_transform(event["new_transform_list"][2])
-                standard.apply_transform(event["ai_matrix"])
-                event["standard"] = standard
+            if input_info.get("std_crown"):
+                std_crown, occ_id = decompress_drc(input_info["std_crown"])
+                std_crown.apply_transform(input_info["new_transform_list"][1])
+                std_crown.apply_transform(input_info["new_transform_list"][0])
+                std_crown.apply_transform(input_info["new_transform_list"][2])
+                std_crown.apply_transform(input_info["ai_matrix"])
+                input_info["std_crown"] = std_crown
+                input_info["occ_id"] = np.where(np.array(occ_id) == 1)[0]
+                standard, _ = decompress_drc(input_info["standard"])
+                standard.apply_transform(input_info["new_transform_list"][1])
+                standard.apply_transform(input_info["new_transform_list"][0])
+                standard.apply_transform(input_info["new_transform_list"][2])
+                standard.apply_transform(input_info["ai_matrix"])
+                input_info["standard"] = standard
             else:
-                standard, occ_id = decompress_drc(event["standard"])
-                standard.apply_transform(event["new_transform_list"][1])
-                standard.apply_transform(event["new_transform_list"][0])
-                standard.apply_transform(event["new_transform_list"][2])
-                standard.apply_transform(event["ai_matrix"])
-                event["standard"] = standard
-                event["occ_id"] = np.where(np.array(occ_id) == 1)[0]
-            
+                standard, occ_id = decompress_drc(input_info["standard"])
+                standard.apply_transform(input_info["new_transform_list"][1])
+                standard.apply_transform(input_info["new_transform_list"][0])
+                standard.apply_transform(input_info["new_transform_list"][2])
+                standard.apply_transform(input_info["ai_matrix"])
+                input_info["standard"] = standard
+                input_info["occ_id"] = np.where(np.array(occ_id) == 1)[0]
 
-            # standard, out_flags = decompress_drc(event["standard"])
-            # standard.apply_transform(event["new_transform_list"][1])
-            # standard.apply_transform(event["new_transform_list"][0])
-            # standard.apply_transform(event["new_transform_list"][2])
-            # standard.apply_transform(event["ai_matrix"])
-            # event["standard"] = standard
-            # config = {}
-            # config['occl_points'] = np.where((np.array(out_flags) & (1 << 0)) != 0)[0]
-            # config['adj1_points'] = np.where((np.array(out_flags) & (1 << 1)) != 0)[0]
-            # config['adj2_points'] = np.where((np.array(out_flags) & (1 << 2)) != 0)[0]
-            # config['fcm_points'] = np.where((np.array(out_flags) & (1 << 3)) != 0)[0]
-            # config['nfcm_points'] = np.where((np.array(out_flags) & (1 << 4)) != 0)[0]
-            # config['fcd_points'] = np.where((np.array(out_flags) & (1 << 5)) != 0)[0]
-            # config['nfcd_points'] = np.where((np.array(out_flags) & (1 << 6)) != 0)[0]
-            # config['oc_points'] = np.where((np.array(out_flags) & (1 << 7)) != 0)[0]
-            
+            # control_pts_front 与 mesh 同步坐标变换
+            if input_info.get("control_pts_front"):
+                input_info["control_pts_front"] = _transform_points(
+                    input_info["control_pts_front"],
+                    input_info["new_transform_list"],
+                    input_info["ai_matrix"],
+                )
 
-        post_out = post(event)
-        if post_out.occ_id is not None:
-            crown = compress_drc(
-                post_out.mesh,
-                [
-                    post_out.points_inner_id,
-                    post_out.points_edge_outer_id,
-                    post_out.points_edge_inner_id,
-                    post_out.mesh.occ_id.idx,
-                ],
-            )
-        else:
-            crown = compress_drc(
-                post_out.mesh,
-                [
-                    post_out.points_inner_id,
-                    post_out.points_edge_outer_id,
-                    post_out.points_edge_inner_id,
-                ],
-            )
+        post_out = post(input_info)
+        crown = _compress_postprocess_crown(post_out)
         out = compress_drc(post_out.mesh_outside)
         inner = compress_drc(post_out.mesh_beiya)
         thickness_shell = compress_drc(post_out.thickness_shell)
@@ -268,98 +320,38 @@ def handler(event, context):
         print_matrix = np.array(post_out.print_matrix).tolist()
         template_name = post_out.template_name
 
-        if event.get("multi_restoration"):
-            cpu_info_json = {
-                "mesh_oppo": compress_drc(post_out.mesh_oppo),
-                "mesh_jaw": compress_drc(post_out.mesh_jaw),
-                "closer": closer,
-                "further": further,
-                "beiya_id": post_out.miss_id,
-                "is_single": post_out.is_single,
-                "cpu_points_info": cpu_points_info,
-                "axis": axis,
-                "template_name": template_name,
-                "rot_matrix": event["new_transform_list"],
-                "ai_matrix": event["ai_matrix"],
-            }
-        else:
-            cpu_info_json = {
-                "mesh_oppo": compress_drc(post_out.mesh_oppo),
-                "closer": closer,
-                "further": further,
-                "beiya_id": post_out.miss_id,
-                "is_single": post_out.is_single,
-                "cpu_points_info": cpu_points_info,
-                "axis": axis,
-                "template_name": template_name,
-            }
+        cpu_info_json = _build_postprocess_cpu_info_json(
+            post_out,
+            input_info,
+            closer,
+            further,
+            cpu_points_info,
+            axis,
+            template_name,
+        )
 
-        if event.get("multi_restoration"):
-            post_out.mesh.apply_transform(np.linalg.pinv(event["ai_matrix"]))
-            post_out.mesh.apply_transform(
-                np.linalg.pinv(event["new_transform_list"][2])
-            )
-            post_out.mesh.apply_transform(
-                np.linalg.pinv(event["new_transform_list"][0])
-            )
-            post_out.mesh.apply_transform(
-                np.linalg.pinv(event["new_transform_list"][1])
-            )
-            if post_out.occ_id is not None:
-                crown = compress_drc(
-                    post_out.mesh,
-                    [
-                        post_out.points_inner_id,
-                        post_out.points_edge_outer_id,
-                        post_out.points_edge_inner_id,
-                        post_out.mesh.occ_id.idx,
-                    ],
-                )
-            else:
-                crown = compress_drc(
-                    post_out.mesh,
-                    [
-                        post_out.points_inner_id,
-                        post_out.points_edge_outer_id,
-                        post_out.points_edge_inner_id,
-                    ],
-                )
+        if input_info.get("multi_restoration"):
+            _apply_multi_restoration_inverse_transforms(post_out.mesh, input_info)
+            crown = _compress_postprocess_crown(post_out)
 
-            post_out.mesh_outside.apply_transform(np.linalg.pinv(event["ai_matrix"]))
-            post_out.mesh_outside.apply_transform(
-                np.linalg.pinv(event["new_transform_list"][2])
-            )
-            post_out.mesh_outside.apply_transform(
-                np.linalg.pinv(event["new_transform_list"][0])
-            )
-            post_out.mesh_outside.apply_transform(
-                np.linalg.pinv(event["new_transform_list"][1])
+            _apply_multi_restoration_inverse_transforms(
+                post_out.mesh_outside, input_info
             )
             out = compress_drc(post_out.mesh_outside)
 
-            post_out.mesh_beiya.apply_transform(np.linalg.pinv(event["ai_matrix"]))
-            post_out.mesh_beiya.apply_transform(
-                np.linalg.pinv(event["new_transform_list"][2])
-            )
-            post_out.mesh_beiya.apply_transform(
-                np.linalg.pinv(event["new_transform_list"][0])
-            )
-            post_out.mesh_beiya.apply_transform(
-                np.linalg.pinv(event["new_transform_list"][1])
+            _apply_multi_restoration_inverse_transforms(
+                post_out.mesh_beiya, input_info
             )
             inner = compress_drc(post_out.mesh_beiya)
 
-            post_out.thickness_shell.apply_transform(np.linalg.pinv(event["ai_matrix"]))
-            post_out.thickness_shell.apply_transform(
-                np.linalg.pinv(event["new_transform_list"][2])
-            )
-            post_out.thickness_shell.apply_transform(
-                np.linalg.pinv(event["new_transform_list"][0])
-            )
-            post_out.thickness_shell.apply_transform(
-                np.linalg.pinv(event["new_transform_list"][1])
+            _apply_multi_restoration_inverse_transforms(
+                post_out.thickness_shell, input_info
             )
             thickness_shell = compress_drc(post_out.thickness_shell)
+            mesh_tmp = post_out.mesh_tmp
+            for k, v in mesh_tmp.items():
+                _apply_multi_restoration_inverse_transforms(v, input_info)
+                mesh_tmp[k] = compress_drc(v)
 
         post_json = {
             "crown": crown,
@@ -376,9 +368,18 @@ def handler(event, context):
             "cpu_input_json": cpu_input_json,
             "self_intersecting": post_out.self_intersecting,
             "thick_shell_hit": post_out.colloision,
+            "warning_info":post_out.warning_info,
+            "collides_with_antagonist": post_out.collides_with_antagonist,
+            "collides_with_adjacent": post_out.collides_with_adjacent,
+            "mesh_tmp": mesh_tmp,
         }
-
         print("suncess postprocess")
+        if event.get("target_url"):
+            upload_response = upload_result(
+                event.get("target_url"), post_json, requests
+            )
+            print(upload_response.status_code)
+            return {"Msg": {"data": "result saved to target url"}, "Code": 200, "State": "Success"}
 
         return {"Msg": {"data": post_json}, "Code": 200, "State": "Success"}
     except Exception as _:
@@ -388,116 +389,4 @@ def handler(event, context):
 
 
 if __name__ == "__main__":
-    import os
-    import time
-
-    # dir_path = "test_data_/muti_crown/post"
-    # files = os.listdir(dir_path)
-    # error_file = [
-    #     "cf576eee-361d-4622-8205-ba5987006c19",
-    #     "db1058fe-e21e-4ae9-bc81-c3bc5bd78f99",
-    # ]
-    # for file in files:
-    #     if file in error_file:
-    #         continue
-    #     # file = '9fdb1618-3a1e-4383-bb4e-72e719700997'
-    #     print(1111, file)
-    #     post_case = os.listdir(os.path.join(dir_path, file))
-    #     for case in post_case:
-    #         if not os.path.exists(
-    #             os.path.join(dir_path, file, case, "crown_post.json")
-    #         ):
-    #             continue
-    #         else:
-    #             if os.path.exists(
-    #                 os.path.join(dir_path, file, case, "out3", "fill_gap.stl")
-    #             ):
-    #                 # continue
-    #                 mesh = trimesh.load(
-    #                     os.path.join(dir_path, file, case, "out3", "fill_gap.stl")
-    #                 )
-    #                 # mesh.show()
-    #                 print
-                # with open(os.path.join(dir_path, file, case, "crown_post.json"), "r") as f:
-                #     event = json.load(f)
-                # event["test"] = True
-                # event["save_path"] = os.path.join(dir_path, file, case, 'out3')
-                # out = handler(event, "")
-                # with open(os.path.join(dir_path, file, case, 'out3', "post.json"), "w") as f:
-                #     f.write(json.dumps(out["Msg"]["data"]))
-                # try:
-                #     mesh = trimesh.load(os.path.join(dir_path, file, case, 'out2', 'fill_gap.stl'))
-                #     thick_shell = trimesh.load(os.path.join(dir_path, file, case, 'out2', 'thickness_shell.stl'))
-                # except:
-                #     continue
-                # c = trimesh.collision.CollisionManager()
-                # c.add_object('crown', mesh)
-                # colloision = c.in_collision_single(thick_shell)
-                # if colloision:
-                #     print(file)
-                # with open(os.path.join(dir_path, file, case, 'out2', "post.json"), 'r') as f:
-                #     data = json.load(f)
-                # crown, flag = decompress_drc(data['crown'])
-                # inner = crown.as_open3d.select_by_index(np.where(np.array(flag) == 1)[0])
-                # inner = trimesh.Trimesh(inner.vertices, inner.triangles)
-                # outer = trimesh.load(os.path.join(dir_path, file, case, 'out2', 'mesh_out.stl'))
-                # from crown_cpu import get_thickness_gap
-                # inner.invert()
-                # thick_shell = get_thickness_gap(inner, outer)
-                # thick_shell.export(os.path.join(dir_path, file, case, 'out2', 'thickness_shell.stl'))
-        # break
-    # params = {
-    #     "occlusal_distance": 0.3,
-    #     "ad_gap": -0.03,
-    #     "prox_or_occlu": 2,
-    #     "adjust_crown": 0,
-    #     "morph_template": "st_tooth",
-    # }
-
-    # with open("test_data_/test/output.json", "r") as f:
-    #     event_gpu = json.load(f)
-
-    # with open("test_data_/test/input.json", "r") as f:
-    #     event = json.load(f)
-
-    # with open("test_data_/test/output_std.json", "r") as f:
-    #     event_std = json.load(f)['cpu_std_json']
-    # # mesh_beiya = write_mesh_bytes(trimesh.load('test_data_/muti_crown/case2/mesh_beiya.stl'))
-    # # event['inner'] = mesh_beiya
-    # # event["standard"] = event_gpu["crown_res"]["16"]["pred_st"]
-    # # event["multi_restoration"] = True
-    # for k, v in event_gpu["cpu_process_info"].items():
-    #     if k not in event.keys():
-    #         event[k] = v
-    # for k, v in event_std.items():
-    #     if k not in event.keys():
-    #         event[k] = v
-    # event["paras"] = params
-    # event['test'] = True
-    # event['save_path'] = 'test_data_/test'
-    # out = handler(event, "")
-    # with open("test_data_/muti_crown/case2/post.json", "w") as f:
-    #     f.write(json.dumps(out["Msg"]["data"]))
-
-    # params = {
-    #     "occlusal_distance": 0.3,
-    #     "ad_gap": -0.03,
-    #     "prox_or_occlu": 2,
-    #     "adjust_crown": 1,
-    #     "morph_template": "st_tooth",
-    # }
-    # with open("test_data_/test/crown_post_36.json", "r") as f:
-    #     event = json.load(f)
-    with open("test_data_/thick_shell/095193d9-dbbd-4ce0-831f-5ad15edf8a87/crown_post.json", "r") as f:
-        event = json.load(f)
-    # with open("/home/wanglong/下载/data/1/response_pcd.json", "r") as f:
-    #     event_out = json.load(f)
-    # event_input = event['cpu_input_json']
-    # for k, v in event_input.items():
-    #     event[k] = v
-    event["test"] = True
-    event["save_path"] = 'test_data_/thick_shell/095193d9-dbbd-4ce0-831f-5ad15edf8a87'
-    event["paras"]["fill_undercut"] = True
-    out = handler(event, "")
-    with open("test_data_/thick_shell/095193d9-dbbd-4ce0-831f-5ad15edf8a87/post.json", "w") as f:
-        f.write(json.dumps(out["Msg"]["data"]))
+    pass

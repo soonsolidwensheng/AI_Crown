@@ -1,0 +1,37 @@
+# 本地 Flask 测试应用镜像，与 Lambda 共用同一套 crown_cpu 与依赖，仅运行时不同。
+FROM docker.1ms.run/python:3.8.18
+
+ARG APP_DIR="/app"
+WORKDIR ${APP_DIR}/crown_cpu
+
+# 复制代码与依赖列表
+COPY ./requirements.txt ${APP_DIR}/requirements.txt
+
+# 安装依赖
+RUN pip install uv -i https://pypi.tuna.tsinghua.edu.cn/simple
+RUN uv pip install --system -r ${APP_DIR}/requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+# 与现有 Dockerfile 一致的 apt 源与系统库
+RUN echo "deb https://mirrors.tuna.tsinghua.edu.cn/debian/ bookworm main" > /etc/apt/sources.list \
+    && echo "deb-src https://mirrors.tuna.tsinghua.edu.cn/debian/ bookworm main" >> /etc/apt/sources.list
+# 安装启动脚本依赖
+RUN apt-get update && apt-get install -y \
+    libgl1-mesa-glx \
+    && rm -rf /var/lib/apt/lists/*
+COPY . ${APP_DIR}
+
+# 复制启动脚本
+COPY ./crown_cpu/start.sh ${APP_DIR}/crown_cpu/start.sh
+RUN chmod +x ${APP_DIR}/crown_cpu/start.sh
+
+# 与 Lambda 镜像一致：替换 trimesh 的 remesh 模块
+RUN mv ${APP_DIR}/crown_cpu/remesh.py /usr/local/lib/python3.8/site-packages/trimesh/remesh.py
+
+ENV LD_LIBRARY_PATH=${APP_DIR}/crown_cpu
+ENV PYTHONUNBUFFERED=1
+ENV REQUEST_TIMEOUT=180
+EXPOSE 5000
+
+WORKDIR ${APP_DIR}/crown_cpu
+CMD ["./start.sh"]
+# docker build -f ./Dockerfile.flask -t crown:local .

@@ -47,7 +47,7 @@ class TrackedTrimesh(trimesh.Trimesh):
     def add_keypoint(self, name, idx=None, pt=None, mode=0):
         """
         新增一个关键点并将其作为类的属性保存
-        
+
         :param name: 关键点的名称，将其作为属性名
         :param idx: 关键点的索引
         :param pt: 关键点的坐标，如果未提供，则根据索引自动获取
@@ -58,16 +58,27 @@ class TrackedTrimesh(trimesh.Trimesh):
             if len(idx) == 0:
                 pt = np.array([])
             else:
-                pt = self.vertices[idx]
+                # 检查索引是否超出顶点范围
+                idx = np.array(idx)
+                if idx.max() >= len(self.vertices):
+                    print(f"警告: 索引 {idx.max()} 超出顶点范围 (最大索引: {len(self.vertices) - 1})")
+                    # 过滤掉超出范围的索引，同时更新 idx
+                    idx = idx[idx < len(self.vertices)]
+                    if len(idx) == 0:
+                        pt = np.array([])
+                    else:
+                        pt = self.vertices[idx]
+                else:
+                    pt = self.vertices[idx]
         if idx is None:
             idx = self.find_new_points(pt, mode)
         keypoint = Keypoint(idx, pt)
         self.keypoints.append(keypoint)
-        
+
         # 动态将 Keypoint 作为类的属性
         setattr(self, name, keypoint)
 
-    def update_mesh(self, new_vertices=None, new_faces=None):
+    def update_mesh(self, new_vertices=None, new_faces=None, reorder=False):
         """
         更新网格顶点并自动更新所有关键点的信息
         
@@ -84,10 +95,14 @@ class TrackedTrimesh(trimesh.Trimesh):
                     self.vert_num = len(new_vertices)
                     self.faces = np.array(new_faces)
                 else:
-                    # 顶点数量不变，仅更新关键点的坐标
-                    self.vertices = new_vertices
-                    self.faces = np.array(new_faces)
-                    self._update_keypoints()
+                    if reorder:
+                        self._reassign_keypoints(new_vertices)
+                        self.vertices = new_vertices
+                        self.faces = np.array(new_faces)
+                    else:
+                        self.vertices = new_vertices
+                        self.faces = np.array(new_faces)
+                        self._update_keypoints()
             else:
                 # 顶点数量不变，仅更新关键点的坐标
                 self.vertices = new_vertices
@@ -139,7 +154,18 @@ class TrackedTrimesh(trimesh.Trimesh):
         """
         for keypoint in self.keypoints:
             if len(keypoint.idx):
-                keypoint.pt = self.vertices[keypoint.idx]
+                idx = np.array(keypoint.idx)
+                # 检查索引是否超出顶点范围
+                if idx.max() >= len(self.vertices):
+                    print(f"警告: 索引 {idx.max()} 超出顶点范围 (最大索引: {len(self.vertices) - 1})")
+                    # 过滤掉超出范围的索引，同时更新 keypoint.idx
+                    keypoint.idx = idx[idx < len(self.vertices)]
+                    if len(keypoint.idx) > 0:
+                        keypoint.pt = self.vertices[keypoint.idx]
+                    else:
+                        keypoint.pt = np.array([])
+                else:
+                    keypoint.pt = self.vertices[keypoint.idx]
             else:
                 keypoint.pt = np.array([])
 
